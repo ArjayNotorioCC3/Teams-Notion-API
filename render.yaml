@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: teams-notion-middleware
+    env: python
+    plan: free
+    region: oregon  # Choose region closest to your users
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    
+    # Health check configuration - helps keep service warm
+    healthCheckPath: /health
+    
+    # Auto-deploy configuration
+    branch: main
+    
+    # Environment variables (add these in Render dashboard or here)
+    envVars:
+      # Python version
+      - key: PYTHON_VERSION
+        value: 3.11
+      
+      # Keep-alive settings (prevents cold starts)
+      - key: KEEP_ALIVE_ENABLED
+        value: true
+      - key: KEEP_ALIVE_INTERVAL_SECONDS
+        value: 600  # 10 minutes (Render spins down after 15 minutes idle)
+      
+      # Microsoft Graph API Credentials (set in Render dashboard)
+      - key: MICROSOFT_CLIENT_ID
+        sync: false  # Mark as sensitive
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_TENANT_ID
+        sync: false
+      
+      # Notion API Credentials (set in Render dashboard)
+      - key: NOTION_API_TOKEN
+        sync: false
+      - key: NOTION_DATABASE_ID
+        sync: false
+      
+      # Allowed Users (set in Render dashboard)
+      - key: ALLOWED_USERS
+        sync: false
+      
+      # Webhook Configuration (update URL after deployment)
+      - key: WEBHOOK_NOTIFICATION_URL
+        value: https://teams-notion-middleware.onrender.com/webhook/notification
+      - key: WEBHOOK_CLIENT_STATE
+        sync: false  # Set to a random secret string
+      
+      # Optional: Default ticket status
+      - key: DEFAULT_TICKET_STATUS
+        value: New
+      
+      # Optional: Source identifier
+      - key: TICKET_SOURCE
+        value: Teams

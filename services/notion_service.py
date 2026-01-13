@@ -9,12 +9,16 @@ logger = logging.getLogger(__name__)
 
 NOTION_API_BASE = "https://api.notion.com/v1"
 
+# Connection pool settings for better performance
+CONNECTION_LIMIT = 5
+TIMEOUT = 30.0
+
 
 class NotionService:
     """Service for interacting with Notion API."""
     
     def __init__(self):
-        """Initialize the Notion service."""
+        """Initialize the Notion service with connection pooling."""
         self.database_id = settings.notion_database_id
         self.api_token = settings.notion_api_token
         self.headers = {
@@ -22,6 +26,25 @@ class NotionService:
             "Content-Type": "application/json",
             "Notion-Version": "2022-06-28"
         }
+        
+        # Create persistent httpx client with connection pooling
+        # This reuses connections and reduces TCP handshake overhead
+        self._http_client = httpx.Client(
+            limits=httpx.Limits(
+                max_connections=CONNECTION_LIMIT,
+                max_keepalive_connections=CONNECTION_LIMIT,
+                keepalive_expiry=300.0
+            ),
+            timeout=TIMEOUT
+        )
+        
+        logger.info(f"NotionService initialized with connection pooling (max={CONNECTION_LIMIT})")
+    
+    def __del__(self):
+        """Cleanup httpx client on destruction."""
+        if hasattr(self, '_http_client'):
+            self._http_client.close()
+            logger.debug("NotionService httpx client closed")
     
     def _make_request(
         self,
@@ -31,6 +54,8 @@ class NotionService:
     ) -> Dict[str, Any]:
         """
         Make an authenticated request to Notion API.
+        
+        Uses persistent httpx client with connection pooling for better performance.
         
         Args:
             method: HTTP method (GET, POST, PATCH, etc.)
@@ -46,16 +71,15 @@ class NotionService:
         url = f"{NOTION_API_BASE}/{endpoint.lstrip('/')}"
         
         try:
-            with httpx.Client() as client:
-                response = client.request(
-                    method=method,
-                    url=url,
-                    headers=self.headers,
-                    json=data,
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                return response.json()
+            # Use persistent client with connection pooling
+            response = self._http_client.request(
+                method=method,
+                url=url,
+                headers=self.headers,
+                json=data
+            )
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPStatusError as e:
             logger.error(f"Notion API request failed: {e.response.status_code} - {e.response.text}")
             raise
