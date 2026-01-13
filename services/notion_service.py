@@ -1,0 +1,249 @@
+"""Notion API service for ticket creation."""
+import logging
+from typing import Optional, Dict, Any, List
+from datetime import datetime, timezone
+import httpx
+from config import settings
+
+logger = logging.getLogger(__name__)
+
+NOTION_API_BASE = "https://api.notion.com/v1"
+
+
+class NotionService:
+    """Service for interacting with Notion API."""
+    
+    def __init__(self):
+        """Initialize the Notion service."""
+        self.database_id = settings.notion_database_id
+        self.api_token = settings.notion_api_token
+        self.headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": "application/json",
+            "Notion-Version": "2022-06-28"
+        }
+    
+    def _make_request(
+        self,
+        method: str,
+        endpoint: str,
+        data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Make an authenticated request to Notion API.
+        
+        Args:
+            method: HTTP method (GET, POST, PATCH, etc.)
+            endpoint: API endpoint (relative to base URL)
+            data: Request body data
+            
+        Returns:
+            Response JSON data
+            
+        Raises:
+            Exception: If request fails
+        """
+        url = f"{NOTION_API_BASE}/{endpoint.lstrip('/')}"
+        
+        try:
+            with httpx.Client() as client:
+                response = client.request(
+                    method=method,
+                    url=url,
+                    headers=self.headers,
+                    json=data,
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Notion API request failed: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Notion API request error: {str(e)}")
+            raise
+    
+    def ticket_exists(self, teams_message_id: str) -> bool:
+        """
+        Check if a ticket with the given Teams Message ID already exists.
+        
+        Args:
+            teams_message_id: Teams message ID to check
+            
+        Returns:
+            True if ticket exists, False otherwise
+        """
+        try:
+            # Query the database for existing ticket with this message ID
+            query_data = {
+                "filter": {
+                    "property": "Teams Message ID",
+                    "rich_text": {
+                        "equals": teams_message_id
+                    }
+                }
+            }
+            
+            response = self._make_request("POST", f"/databases/{self.database_id}/query", data=query_data)
+            results = response.get("results", [])
+            return len(results) > 0
+        except Exception as e:
+            logger.warning(f"Error checking for existing ticket: {str(e)}")
+            # If query fails, assume ticket doesn't exist to avoid blocking creation
+            return False
+    
+    def create_ticket(
+        self,
+        task_title: str,
+        description: str,
+        requester_email: str,
+        requester_name: Optional[str],
+        teams_message_id: str,
+        teams_channel: str,
+        attachments: List[str],
+        approved_by_email: str,
+        approved_by_name: Optional[str],
+        approved_at: datetime,
+        source: Optional[str] = None,
+        status: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a new ticket in Notion.
+        
+        Args:
+            task_title: Title of the task
+            description: Task description/content
+            requester_email: Email of the message author
+            requester_name: Name of the message author
+            teams_message_id: Unique Teams message ID
+            teams_channel: Channel name or ID
+            attachments: List of attachment URLs
+            approved_by_email: Email of user who added emoji reaction
+            approved_by_name: Name of user who added emoji reaction
+            approved_at: Timestamp when emoji was added
+            source: Source identifier (defaults to config value)
+            status: Status value (defaults to config value)
+            
+        Returns:
+            Created page data
+            
+        Raises:
+            Exception: If ticket creation fails
+        """
+        # Check for duplicates
+        if self.ticket_exists(teams_message_id):
+            logger.info(f"Ticket with Teams Message ID {teams_message_id} already exists, skipping creation")
+            raise ValueError(f"Ticket with Teams Message ID {teams_message_id} already exists")
+        
+        if source is None:
+            source = settings.ticket_source
+        if status is None:
+            status = settings.default_ticket_status
+        
+        # Format attachments as a single string or rich text
+        attachments_text = "\n".join(attachments) if attachments else ""
+        
+        # Format approved_at timestamp
+        approved_at_iso = approved_at.isoformat()
+        last_synced_iso = datetime.now(timezone.utc).isoformat()
+        
+        # Build properties for Notion page
+        properties = {
+            "Task Title": {
+                "title": [
+                    {
+                        "text": {
+                            "content": task_title[:2000]  # Notion title limit
+                        }
+                    }
+                ]
+            },
+            "Description": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": description[:2000]  # Truncate if too long
+                        }
+                    }
+                ]
+            },
+            "Status": {
+                "select": {
+                    "name": status
+                }
+            },
+            "Requester": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": requester_name or requester_email
+                        }
+                    }
+                ]
+            },
+            "Teams Message ID": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": teams_message_id
+                        }
+                    }
+                ]
+            },
+            "Teams Channel": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": teams_channel
+                        }
+                    }
+                ]
+            },
+            "Attachments (URL)": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": attachments_text[:2000] if attachments_text else "None"
+                        }
+                    }
+                ]
+            },
+            "Approved By": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": approved_by_name or approved_by_email
+                        }
+                    }
+                ]
+            },
+            "Approved At": {
+                "date": {
+                    "start": approved_at_iso
+                }
+            },
+            "Source": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": source
+                        }
+                    }
+                ]
+            },
+            "Last Synced": {
+                "date": {
+                    "start": last_synced_iso
+                }
+            }
+        }
+        
+        page_data = {
+            "parent": {
+                "database_id": self.database_id
+            },
+            "properties": properties
+        }
+        
+        logger.info(f"Creating Notion ticket for Teams message {teams_message_id}")
+        return self._make_request("POST", "/pages", data=page_data)
