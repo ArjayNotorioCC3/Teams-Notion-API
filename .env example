@@ -1,0 +1,21 @@
+# Microsoft Graph API Credentials
+MICROSOFT_CLIENT_ID=your_client_id_here
+MICROSOFT_CLIENT_SECRET=your_client_secret_here
+MICROSOFT_TENANT_ID=your_tenant_id_here
+
+# Notion API Credentials
+NOTION_API_TOKEN=your_notion_integration_token_here
+NOTION_DATABASE_ID=your_notion_database_id_here
+
+# Allowed Users (comma-separated email list)
+ALLOWED_USERS=user1@example.com,user2@example.com
+
+# Webhook Configuration
+WEBHOOK_NOTIFICATION_URL=https://your-domain.com/webhook/notification
+WEBHOOK_CLIENT_STATE=your_secret_client_state_here
+
+# Optional: Default ticket status
+DEFAULT_TICKET_STATUS=New
+
+# Optional: Source identifier
+TICKET_SOURCE=Teams
