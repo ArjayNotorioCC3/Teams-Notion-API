@@ -23,7 +23,11 @@ services:
       - key: KEEP_ALIVE_ENABLED
         value: true
       - key: KEEP_ALIVE_INTERVAL_SECONDS
-        value: 600  # 10 minutes (Render spins down after 15 minutes idle)
+        value: 300  # 5 minutes (Render spins down after 15 minutes idle)
+      
+      # Auto-warmup before subscription creation
+      - key: AUTO_WARMUP_BEFORE_SUBSCRIPTION
+        value: true
       
       # Microsoft Graph API Credentials (set in Render dashboard)
       - key: MICROSOFT_CLIENT_ID

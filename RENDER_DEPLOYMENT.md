@@ -21,7 +21,7 @@ Your application has been optimized for Render.com free tier to address the "Sub
    - **Impact:** Prevents re-initialization on each request
 
 3. **Background Keep-Alive Task** (`main.py`)
-   - Auto-pings `/health` endpoint every 10 minutes
+   - Auto-pings `/health` endpoint every 5 minutes (300 seconds)
    - Keeps service warm and prevents cold starts
    - Configurable via environment variables
    - **Impact:** Service stays responsive during testing sessions
@@ -39,9 +39,21 @@ Your application has been optimized for Render.com free tier to address the "Sub
 
 6. **Render Configuration** (`render.yaml`)
    - Health check path configured
-   - Keep-alive intervals set to 600 seconds (10 minutes)
+   - Keep-alive intervals set to 300 seconds (5 minutes)
    - Environment variables pre-configured
    - **Impact:** Automated deployment with all optimizations
+
+7. **Automatic Warmup Before Subscription Creation** (`routes/subscription.py`)
+   - Automatically checks if service is warm before creating subscriptions
+   - Warms up GraphService if token is missing or expiring soon
+   - Configurable via `AUTO_WARMUP_BEFORE_SUBSCRIPTION` environment variable
+   - **Impact:** Ensures service is ready when Microsoft Graph sends validation request
+
+8. **Retry Logic with Exponential Backoff** (`services/graph_service.py`)
+   - Automatically retries subscription creation on validation timeout
+   - Uses exponential backoff: 2s, 4s, 8s delays between retries
+   - Refreshes access token before each retry
+   - **Impact:** Handles transient network issues and cold start delays
 
 ## Deployment Instructions
 
@@ -131,9 +143,13 @@ Expected response:
 
 **Step 4: Create a Subscription**
 
-After warmup is complete, create a subscription:
+The service will automatically warm up before creating subscriptions, but you can also explicitly warm up:
 ```bash
-curl -X POST "https://your-app-name.onrender.com/subscription/create" \
+# Optional: Explicit warmup (auto-warmup is enabled by default)
+curl https://your-app-name.onrender.com/keep-alive/warmup
+
+# Create subscription (with optional pre_warmup parameter)
+curl -X POST "https://your-app-name.onrender.com/subscription/create?pre_warmup=true" \
   -H "Content-Type: application/json" \
   -d '{
     "resource": "teams/{teamId}/channels/{channelId}/messages",
@@ -142,7 +158,7 @@ curl -X POST "https://your-app-name.onrender.com/subscription/create" \
   }'
 ```
 
-**Expected Result:** Subscription should be created successfully WITHOUT the "validation timed out" error.
+**Expected Result:** Subscription should be created successfully WITHOUT the "validation timed out" error. If a timeout occurs, the service will automatically retry up to 3 times with exponential backoff.
 
 ## Testing Workflow
 
@@ -152,7 +168,7 @@ To prevent the service from spinning down during testing:
 
 1. **Option A: Background Keep-Alive (Automatic)**
    - Enabled by default in `render.yaml`
-   - Pings service every 10 minutes
+   - Pings service every 5 minutes (300 seconds)
    - No action required
 
 2. **Option B: Manual Keep-Alive**
@@ -180,25 +196,36 @@ Then wait a few seconds before creating the subscription.
 
 ### "Subscription validation timed out" Still Occurs
 
-**If you still get the timeout error:**
+**If you still get the timeout error after retries:**
 
-1. Check if service is warm:
+1. The service automatically retries up to 3 times with exponential backoff. Check logs to see retry attempts.
+
+2. Check if service is warm:
    ```bash
    curl https://your-app-name.onrender.com/keep-alive/status
    ```
    If `token_available: false`, the service is not warm.
 
-2. Call warmup endpoint:
+3. Call warmup endpoint explicitly:
    ```bash
    curl https://your-app-name.onrender.com/keep-alive/warmup
    ```
 
-3. Check warmup time - if > 5000ms, you may have network issues:
+4. Use pre_warmup parameter when creating subscription:
+   ```bash
+   curl -X POST "https://your-app-name.onrender.com/subscription/create?pre_warmup=true" \
+     -H "Content-Type: application/json" \
+     -d '{...}'
+   ```
+
+5. Check warmup time - if > 5000ms, you may have network issues:
    - Retry after warmup
    - Consider using a different Render region
    - Or upgrade to paid tier for consistent performance
 
-4. Check logs in Render dashboard for errors
+6. Check logs in Render dashboard for detailed error messages and retry attempts
+
+7. Consider using an external keep-alive service (UptimeRobot) to keep service warm 24/7
 
 ### Service Still Spinning Down
 
@@ -206,8 +233,8 @@ Then wait a few seconds before creating the subscription.
 
 1. Verify `KEEP_ALIVE_ENABLED=true` in environment variables
 2. Check logs for "Starting background keep-alive task" message
-3. Verify keep-alive pings in logs every 10 minutes
-4. Manual workaround: Create UptimeRobot monitor
+3. Verify keep-alive pings in logs every 5 minutes (300 seconds)
+4. Manual workaround: Create UptimeRobot monitor with 5-minute interval
 
 ### High Warmup Time (>5 seconds)
 
@@ -226,10 +253,17 @@ Then wait a few seconds before creating the subscription.
   - Enable/disable background keep-alive task
   - Set to `false` to disable automatic pinging
 
-- `KEEP_ALIVE_INTERVAL_SECONDS` (default: `600`)
+- `KEEP_ALIVE_INTERVAL_SECONDS` (default: `300`)
   - Interval between keep-alive pings in seconds
-  - Recommended: 600 (10 minutes) - Render spins down after 15 minutes
-  - Minimum: 300 (5 minutes) to stay well ahead of spin-down
+  - Default: 300 (5 minutes) - keeps service warm on Render free tier
+  - Render spins down after 15 minutes, so 5-minute intervals prevent spin-down
+  - Minimum: 300 (5 minutes) recommended for free tier
+
+- `AUTO_WARMUP_BEFORE_SUBSCRIPTION` (default: `true`)
+  - Automatically warm up services before creating subscriptions
+  - Checks if access token is available and valid
+  - Warms up GraphService if token is missing or expiring soon
+  - Set to `false` to disable auto-warmup (manual warmup still available via `pre_warmup` parameter)
 
 ### Service Settings
 
@@ -276,9 +310,12 @@ For production use or consistent performance:
 Your app is now optimized for Render free tier with:
 
 ✅ Pre-warmed services on startup
-✅ Background keep-alive task
+✅ Background keep-alive task (5-minute intervals)
+✅ Automatic warmup before subscription creation
+✅ Retry logic with exponential backoff for validation timeouts
 ✅ Connection pooling for faster API calls
 ✅ Manual warmup endpoint for critical operations
+✅ Improved error handling and logging
 ✅ Render deployment configuration ready
 
 **Next Steps:**

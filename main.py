@@ -103,11 +103,11 @@ async def shutdown_event():
 async def background_keep_alive():
     """
     Background task to keep service warm and prevent cold starts.
-    Pings /health endpoint every 10 minutes to keep service active on Render free tier.
+    Pings /health endpoint every 5 minutes to keep service active on Render free tier.
     """
     import httpx
     
-    keep_alive_interval = int(os.getenv("KEEP_ALIVE_INTERVAL_SECONDS", "600"))
+    keep_alive_interval = int(os.getenv("KEEP_ALIVE_INTERVAL_SECONDS", "300"))
     logger.info(f"Keep-alive task running - interval: {keep_alive_interval}s")
     
     # Ping self to keep service warm

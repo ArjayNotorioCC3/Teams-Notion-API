@@ -130,20 +130,43 @@ class GraphService:
             return response.json()
         except httpx.HTTPStatusError as e:
             error_detail = e.response.text
+            error_code = "Unknown"
+            is_validation_timeout = False
+            
             try:
                 error_json = e.response.json()
                 error_detail = error_json.get("error", {}).get("message", error_detail)
+                error_code = error_json.get("error", {}).get("code", "Unknown")
+                
+                # Check if this is a validation timeout error
+                is_validation_timeout = (
+                    error_code == "ValidationError" and 
+                    "timeout" in error_detail.lower()
+                ) or "Subscription validation request timed out" in error_detail
+                
                 # Log full error response for debugging
                 logger.error(f"Graph API full error response: {error_json}")
-                # Also log error code if available
-                error_code = error_json.get("error", {}).get("code", "Unknown")
                 logger.error(f"Graph API error code: {error_code}")
+                
+                # Special logging for validation timeout
+                if is_validation_timeout:
+                    logger.error(
+                        "VALIDATION TIMEOUT DETECTED: Microsoft Graph validation request timed out. "
+                        "This usually indicates the service was cold or network latency delayed the validation request. "
+                        "The webhook endpoint may have responded correctly, but too late for Microsoft Graph's timeout window."
+                    )
             except:
                 pass
+            
             logger.error(f"Graph API request failed: {e.response.status_code} - {error_detail}")
             logger.error(f"Request URL: {url}")
             logger.error(f"Request method: {method}")
-            raise Exception(f"Graph API error {e.response.status_code}: {error_detail}")
+            
+            # Preserve validation timeout information in exception message
+            if is_validation_timeout:
+                raise Exception(f"Graph API error {e.response.status_code}: Subscription validation request timed out.")
+            else:
+                raise Exception(f"Graph API error {e.response.status_code}: {error_detail}")
         except Exception as e:
             logger.error(f"Graph API request error: {str(e)}")
             raise
@@ -186,6 +209,102 @@ class GraphService:
         logger.info(f"Creating subscription with payload: {subscription_data}")
         
         return self._make_request("POST", "/subscriptions", data=subscription_data)
+    
+    def create_subscription_with_retry(
+        self,
+        resource: str,
+        change_types: List[str],
+        notification_url: str,
+        expiration_datetime: Optional[datetime] = None,
+        lifecycle_notification_url: Optional[str] = None,
+        max_retries: int = 3,
+        initial_delay: float = 2.0
+    ) -> Dict[str, Any]:
+        """
+        Create a webhook subscription with automatic retry on validation timeout.
+        
+        Retries subscription creation with exponential backoff if Microsoft Graph
+        validation request times out. This handles cases where the service is cold
+        or network latency delays validation requests.
+        
+        Args:
+            resource: Resource to subscribe to
+            change_types: List of change types
+            notification_url: URL to receive notifications
+            expiration_datetime: Subscription expiration
+            lifecycle_notification_url: URL for lifecycle notifications
+            max_retries: Maximum number of retry attempts (default: 3)
+            initial_delay: Initial delay in seconds before first retry (default: 2.0)
+            
+        Returns:
+            Subscription data
+            
+        Raises:
+            Exception: If all retries fail
+        """
+        import time
+        
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Before retry (except first attempt), ensure service is warm
+                if attempt > 0:
+                    delay = initial_delay * (2 ** (attempt - 1))
+                    logger.info(f"Retry attempt {attempt + 1}/{max_retries} after {delay:.1f}s delay")
+                    time.sleep(delay)
+                    
+                    # Ensure token is fresh before retry
+                    logger.info("Refreshing access token before retry...")
+                    try:
+                        self._get_access_token()
+                        logger.info("Token refreshed successfully")
+                    except Exception as e:
+                        logger.warning(f"Token refresh failed: {str(e)}, will continue anyway")
+                
+                # Attempt to create subscription
+                return self.create_subscription(
+                    resource=resource,
+                    change_types=change_types,
+                    notification_url=notification_url,
+                    expiration_datetime=expiration_datetime,
+                    lifecycle_notification_url=lifecycle_notification_url
+                )
+                
+            except Exception as e:
+                last_exception = e
+                error_message = str(e)
+                
+                # Check if this is a validation timeout error
+                is_validation_timeout = (
+                    "Subscription validation request timed out" in error_message or
+                    ("ValidationError" in error_message and "timeout" in error_message.lower())
+                )
+                
+                if is_validation_timeout and attempt < max_retries - 1:
+                    logger.warning(
+                        f"Subscription validation timeout on attempt {attempt + 1}/{max_retries}. "
+                        f"Error: {error_message}. Will retry..."
+                    )
+                    continue
+                else:
+                    # Not a validation timeout, or out of retries
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            f"Subscription creation failed on attempt {attempt + 1}/{max_retries}. "
+                            f"Error: {error_message}. Will retry..."
+                        )
+                    else:
+                        logger.error(
+                            f"Subscription creation failed after {max_retries} attempts. "
+                            f"Last error: {error_message}"
+                        )
+                    raise
+        
+        # Should never reach here, but just in case
+        if last_exception:
+            raise last_exception
+        raise Exception("Subscription creation failed after all retries")
     
     def list_subscriptions(self) -> List[Dict[str, Any]]:
         """

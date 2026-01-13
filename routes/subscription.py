@@ -1,8 +1,9 @@
 """Subscription management routes for Microsoft Graph webhooks."""
 import logging
-from typing import Dict, Any, List
+import os
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from services.graph_service import GraphService
 
@@ -46,18 +47,56 @@ async def list_subscriptions() -> Dict[str, Any]:
 
 
 @router.post("/create")
-async def create_subscription(request: CreateSubscriptionRequest) -> Dict[str, Any]:
+async def create_subscription(
+    request: CreateSubscriptionRequest,
+    pre_warmup: bool = Query(False, description="Explicitly warm up services before creating subscription")
+) -> Dict[str, Any]:
     """
     Create a new webhook subscription.
     
+    Automatically warms up services if token is missing or expiring soon.
+    Uses retry logic with exponential backoff to handle validation timeouts.
+    
     Args:
         request: Subscription creation request
+        pre_warmup: If True, explicitly warm up services before creating subscription
         
     Returns:
         Created subscription data
     """
     try:
         from config import settings
+        import time
+        
+        # Auto-warmup check: ensure service is ready before creating subscription
+        auto_warmup_enabled = os.getenv("AUTO_WARMUP_BEFORE_SUBSCRIPTION", "true").lower() == "true"
+        
+        if auto_warmup_enabled or pre_warmup:
+            # Check if token is available and valid
+            needs_warmup = False
+            try:
+                if not graph_service._access_token or not graph_service._token_expires_at:
+                    needs_warmup = True
+                    logger.info("Access token not available - will warm up service")
+                else:
+                    # Check if token expires within 5 minutes
+                    time_until_expiry = graph_service._token_expires_at - datetime.now(timezone.utc)
+                    if time_until_expiry < timedelta(minutes=5):
+                        needs_warmup = True
+                        logger.info(f"Access token expiring soon ({int(time_until_expiry.total_seconds())}s) - will warm up service")
+            except Exception as e:
+                logger.warning(f"Error checking token status: {str(e)} - will warm up service")
+                needs_warmup = True
+            
+            if needs_warmup or pre_warmup:
+                warmup_start = time.time()
+                logger.info("Auto-warming GraphService before subscription creation...")
+                try:
+                    graph_service._get_access_token()
+                    warmup_time = (time.time() - warmup_start) * 1000
+                    logger.info(f"Service warmup complete - token acquired in {warmup_time:.2f}ms")
+                except Exception as e:
+                    logger.warning(f"Service warmup failed: {str(e)} - will continue anyway")
         
         # Use timezone-aware datetime to avoid clock skew issues
         now = datetime.now(timezone.utc)
@@ -110,18 +149,41 @@ async def create_subscription(request: CreateSubscriptionRequest) -> Dict[str, A
         logger.info(f"Notification URL: {settings.webhook_notification_url}")
         logger.info(f"Lifecycle URL: {lifecycle_notification_url if lifecycle_notification_url else 'N/A'}")
         
-        # All normalization (changeType filtering, expiration capping, resource formatting)
-        # is now handled by the guard function in GraphService.create_subscription()
-        subscription = graph_service.create_subscription(
-            resource=request.resource,
-            change_types=request.change_types,  # Guard function will filter if needed
-            notification_url=settings.webhook_notification_url,
-            expiration_datetime=expiration_datetime,
-            lifecycle_notification_url=lifecycle_notification_url
-        )
+        # Use retry logic to handle validation timeouts
+        subscription_start = time.time()
+        try:
+            subscription = graph_service.create_subscription_with_retry(
+                resource=request.resource,
+                change_types=request.change_types,  # Guard function will filter if needed
+                notification_url=settings.webhook_notification_url,
+                expiration_datetime=expiration_datetime,
+                lifecycle_notification_url=lifecycle_notification_url
+            )
+            subscription_time = (time.time() - subscription_start) * 1000
+            logger.info(f"Successfully created subscription {subscription.get('id')} for resource {request.resource} in {subscription_time:.2f}ms")
+            return subscription
+        except Exception as e:
+            subscription_time = (time.time() - subscription_start) * 1000
+            error_message = str(e)
+            
+            # Check if this is a validation timeout error
+            is_validation_timeout = (
+                "Subscription validation request timed out" in error_message or
+                ("ValidationError" in error_message and "timeout" in error_message.lower())
+            )
+            
+            if is_validation_timeout:
+                logger.error(
+                    f"Subscription validation timeout after {subscription_time:.2f}ms. "
+                    f"This usually means the service was cold or network latency delayed the validation request. "
+                    f"Consider calling /keep-alive/warmup before creating subscriptions, "
+                    f"or using an external keep-alive service."
+                )
+            else:
+                logger.error(f"Subscription creation failed after {subscription_time:.2f}ms: {error_message}")
+            
+            raise
         
-        logger.info(f"Successfully created subscription {subscription.get('id')} for resource {request.resource}")
-        return subscription
     except ValueError as e:
         # Configuration or validation errors
         logger.error(f"Configuration error creating subscription: {str(e)}")
