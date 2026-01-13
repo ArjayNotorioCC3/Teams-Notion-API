@@ -26,7 +26,7 @@ The middleware handles the following flow:
 - Python 3.8 or higher
 - Microsoft Azure App Registration with Graph API permissions
 - Notion workspace with a database and integration token
-- Public URL for receiving webhooks (or use a tunneling service like ngrok for development)
+- Public URL for receiving webhooks (Azure VM with public IP or domain)
 
 ## Setup
 
@@ -106,25 +106,23 @@ TICKET_SOURCE=Teams
 
 ### 5. Webhook URL Setup
 
-For production, use a public URL. For development, you can use [ngrok](https://ngrok.com):
-
-```bash
-ngrok http 8000
-```
-
-Use the ngrok URL as your `WEBHOOK_NOTIFICATION_URL` (e.g., `https://abc123.ngrok.io/webhook/notification`)
+Set `WEBHOOK_NOTIFICATION_URL` to your public endpoint. For Azure VM deployment, see [AZURE_VM_DEPLOYMENT.md](AZURE_VM_DEPLOYMENT.md) for complete setup instructions.
 
 ## Running the Application
 
-```bash
-# Development
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+### Local Development
 
-# Production
-uvicorn main:app --host 0.0.0.0 --port 8000
+```bash
+# Activate virtual environment
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Run development server
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The API will be available at `http://localhost:8000`
+### Production (Azure VM)
+
+See [AZURE_VM_DEPLOYMENT.md](AZURE_VM_DEPLOYMENT.md) for complete deployment instructions. The application runs as a systemd service on Azure VM.
 
 ## API Endpoints
 
@@ -210,67 +208,60 @@ Each ticket created in Notion includes:
 - **Source**: Source identifier (default: "Teams")
 - **Last Synced**: Timestamp when ticket was created
 
+## Deployment
+
+### Azure VM Deployment
+
+For production deployment on Azure Virtual Machine, see the complete guide:
+
+**[AZURE_VM_DEPLOYMENT.md](AZURE_VM_DEPLOYMENT.md)**
+
+This guide includes:
+- Azure VM setup and configuration
+- Systemd service configuration
+- Nginx reverse proxy setup
+- SSL certificate installation (Let's Encrypt)
+- Environment variables configuration
+- Monitoring and troubleshooting
+
 ## Troubleshooting
 
-### Webhook Validation Timeout (Common Local Development Issue)
+### Webhook Validation Timeout
 
 **Symptoms:** Microsoft Graph returns "validation timed out" when creating subscription.
 
 **Root Causes:**
 - Webhook endpoint responding too slowly (> 2 seconds)
-- Clock synchronization issues between local machine and Microsoft servers
-- Incorrect datetime formatting in subscription payload
-- Network latency through ngrok tunnel
+- Network latency between Microsoft Graph and your endpoint
+- Incorrect `WEBHOOK_NOTIFICATION_URL` configuration
 
 **Solutions:**
 
-1. **Test endpoints locally first:**
+1. **Verify webhook endpoint is accessible:**
    ```bash
-   # Run the server
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
-   
-   # In another terminal, run the local test suite
-   python3 test_local.py
-   
-   # Test with a specific resource
-   python3 test_local.py --resource "teams/{teamId}/channels/{channelId}/messages"
+   # Test validation endpoint
+   curl "https://your-domain.com/webhook/notification?validationToken=test123"
+   # Should return: test123
    ```
 
 2. **Check diagnostics:**
    ```bash
    # Comprehensive health check
-   curl http://localhost:8000/diagnostics/health
+   curl https://your-domain.com/diagnostics/health
    
    # View configuration
-   curl http://localhost:8000/diagnostics/config
+   curl https://your-domain.com/diagnostics/config
    
    # List subscriptions with status
-   curl http://localhost:8000/diagnostics/subscriptions
-   
-   # Test subscription payload without creating it
-   curl -X POST "http://localhost:8000/diagnostics/test-subscription-payload" \
-     -H "Content-Type: application/json" \
-     -d '{"resource": "teams/{teamId}/channels/{channelId}/messages"}'
+   curl https://your-domain.com/diagnostics/subscriptions
    ```
 
-3. **Ensure ngrok is configured correctly:**
-   ```bash
-   # Start ngrok
-   ngrok http 8000
-   
-   # Update .env with the ngrok URL
-   WEBHOOK_NOTIFICATION_URL=https://your-ngrok-url.ngrok.io/webhook/notification
-   WEBHOOK_CLIENT_STATE=your_secret_client_state_here
-   
-   # Restart the server after updating .env
-   ```
+3. **Verify configuration:**
+   - Ensure `WEBHOOK_NOTIFICATION_URL` is correctly set to your public endpoint
+   - Check that the endpoint responds in < 2 seconds
+   - Verify firewall/security groups allow HTTP/HTTPS traffic
 
-4. **Verify datetime format:**
-   - The code now uses `datetime.now(timezone.utc)` consistently
-   - All timestamps are formatted with 'Z' suffix (UTC)
-   - Add 30-second buffer for clock skew during subscription creation
-
-5. **For Teams messages specifically:**
+4. **For Teams messages specifically:**
    - Maximum expiration is 1 hour (enforced by code)
    - `lifecycleNotificationUrl` is REQUIRED
    - Only `changeType="created"` is supported
@@ -297,124 +288,36 @@ Each ticket created in Notion includes:
 2. Ensure all required API permissions are granted and consented
 3. Check that the client secret hasn't expired
 
-## Local Development Guide
-
-### Prerequisites
-
-1. **Python 3.8+** with virtual environment
-2. **ngrok** for tunneling (or use ngrok-free alternatives)
-3. **Microsoft Azure App Registration** with Graph API permissions
-4. **Notion Workspace** with database and integration
-
-### Setup Steps
-
-1. **Clone and install dependencies:**
-   ```bash
-   cd Teams-Middleware-FastAPI
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-
-2. **Configure environment variables:**
-   ```bash
-   cp ".env example" .env
-   # Edit .env with your actual credentials
-   ```
-
-3. **Start ngrok tunnel:**
-   ```bash
-   ngrok http 8000
-   # Note the HTTPS URL (e.g., https://abc123.ngrok.io)
-   ```
-
-4. **Update .env with ngrok URL:**
-   ```env
-   WEBHOOK_NOTIFICATION_URL=https://abc123.ngrok.io/webhook/notification
-   WEBHOOK_CLIENT_STATE=your_random_secret_string
-   ```
-
-5. **Run the server:**
-   ```bash
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
-   ```
-
-6. **Test locally before creating subscription:**
-   ```bash
-   python3 test_local.py
-   ```
-
-7. **Create subscription:**
-   ```bash
-   curl -X POST "http://localhost:8000/subscription/create" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "resource": "teams/{teamId}/channels/{channelId}/messages",
-       "change_types": ["created", "updated"],
-       "expiration_days": 1
-     }'
-   ```
-
-### Common Local Development Issues
-
-**Issue:** "validation timed out" when creating subscription
-
-**Fix:**
-1. Run `python3 test_local.py` to verify webhook validation endpoints
-2. Check response times are < 100ms
-3. Ensure ngrok tunnel is stable
-4. Verify clock is synchronized: `timedatectl status` (Linux) or sync with NTP
-
-**Issue:** Subscription expires immediately
-
-**Fix:**
-1. Use `/diagnostics/subscriptions` to check expiration times
-2. Ensure system clock is accurate (sync with NTP)
-3. Check if timezone is causing issues (should be UTC)
-
-**Issue:** Notion tickets not created
-
-**Fix:**
-1. Verify Notion database properties match requirements
-2. Check Notion integration is shared with the database
-3. Review logs for API errors
-4. Test Notion API directly: `GET /diagnostics/health`
-
 ### Debugging Tips
 
-1. **Enable detailed logging:**
-   ```python
-   # In main.py, change logging level to DEBUG
-   logging.basicConfig(level=logging.DEBUG, ...)
-   ```
-
-2. **Test payload before creating subscription:**
+1. **Check service logs (Azure VM):**
    ```bash
-   curl -X POST "http://localhost:8000/diagnostics/test-subscription-payload" \
-     -H "Content-Type: application/json" \
-     -d '{"resource": "teams/{teamId}/channels/{channelId}/messages"}'
+   # View real-time logs
+   sudo journalctl -u teams-notion-api.service -f
+   
+   # View last 100 lines
+   sudo journalctl -u teams-notion-api.service -n 100
    ```
 
-3. **Monitor subscription lifecycle:**
+2. **Test endpoints:**
+   ```bash
+   # Health check
+   curl https://your-domain.com/health
+   
+   # Diagnostics
+   curl https://your-domain.com/diagnostics/health
+   curl https://your-domain.com/diagnostics/config
+   ```
+
+3. **Monitor subscriptions:**
    ```bash
    # List subscriptions with detailed status
-   curl http://localhost:8000/diagnostics/subscriptions
+   curl https://your-domain.com/diagnostics/subscriptions
    
    # Renew expiring subscriptions
-   curl -X POST "http://localhost:8000/subscription/renew-all" \
+   curl -X POST "https://your-domain.com/subscription/renew-all" \
      -H "Content-Type: application/json" \
-     -d '{"expiration_days": 1}'
-   
-   # Clean up expired subscriptions
-   curl -X POST "http://localhost:8000/diagnostics/cleanup-expired"
-   ```
-
-4. **Simulate webhook notification:**
-   ```bash
-   # Test validation endpoint
-   curl "http://localhost:8000/webhook/notification?validationToken=test123"
-   
-   # Should return the token immediately
+     -d '{"expiration_days": 3}'
    ```
 
 ## Project Structure
@@ -430,91 +333,21 @@ Each ticket created in Notion includes:
 │   └── notion_service.py # Notion API service
 ├── routes/                # API endpoints
 │   ├── webhooks.py       # Webhook notification handlers
-│   └── subscription.py   # Subscription management
+│   ├── subscription.py   # Subscription management
+│   └── diagnostics.py   # Diagnostics and monitoring
 ├── utils/                 # Utility functions
 │   ├── auth.py           # Authentication helpers
-│   └── validation.py     # User authorization
+│   ├── validation.py     # User authorization
+│   └── graph_subscriptions.py  # Subscription normalization
+├── systemd/               # Systemd service configuration
+│   └── teams-notion-api.service
+├── deploy/                # Deployment scripts
+│   └── deploy.sh         # Deployment automation script
 ├── requirements.txt       # Python dependencies
-└── README.md             # This file
+├── README.md             # This file
+└── AZURE_VM_DEPLOYMENT.md # Azure VM deployment guide
 ```
 
 ## License
 
 This project is provided as-is for integration purposes.
-
-### Ngrok Domain Issues
-
-**Problem:** Free ngrok domains (ngrok-free.dev) often have high latency and routing issues that cause validation timeouts.
-
-**Solutions:**
-
-1. **Use Standard Ngrok Domain:**
-   \`\`\`bash
-   # Free tier - better routing than ngrok-free.dev
-   ngrok http 8000
-   
-   # This gives URL like: https://abc123.ngrok.io
-   # Update .env with this URL
-   WEBHOOK_NOTIFICATION_URL=https://abc123.ngrok.io/webhook/notification
-   \`\`\`
-
-2. **Use Paid Ngrok Reserved Domain:**
-   \`\`\`bash
-   # \$10/month - reserved domain, no connection drops
-   # Sign up at: https://ngrok.com/pricing
-   # After reserved domain:
-   ngrok http 8000 --domain=your-reserved-domain.ngrok.io
-   \`\`\`
-
-3. **Use Cloudflare Tunnel (Alternative):**
-   \`\`\`bash
-   # Install cloudflared
-   brew install cloudflared  # macOS
-   # or download from: https://github.com/cloudflare/cloudflared
-   
-   # Start tunnel
-   cloudflared tunnel --url http://localhost:8000
-   
-   # Typically has better routing and lower latency than ngrok free
-   \`\`\`
-
-4. **Use LocalTunnel (Alternative):**
-   \`\`\`bash
-   # Install
-   npm install -g localtunnel
-   
-   # Start tunnel
-   localtunnel --port 8000
-   \`\`\`
-
-**Recommendations:**
-- **For local development:** Use standard ngrok free tier (\`.ngrok.io\`)
-- **For consistent testing:** Consider paid ngrok reserved domain (\$10/month)
-- **If ngrok is unstable:** Try Cloudflare Tunnel or LocalTunnel
-- **Best option for production:** Deploy to Azure with public endpoint
-
-### Pre-Validation Testing
-
-Before creating a Microsoft Graph subscription, test your webhook endpoint's actual round-trip time:
-
-\`\`\`bash
-# Test validation response time (simulates Microsoft Graph validation)
-curl "http://localhost:8000/pre-validation/test?validationToken=test123"
-
-# Check response time in headers
-curl -I "http://localhost:8000/pre-validation/test?validationToken=test123"
-
-# Simulate full Microsoft Graph validation request
-curl "http://localhost:8000/pre-validation/simulate?base_url=http://localhost:8000"
-\`\`\`
-
-**Response Time Benchmarks:**
-- **< 50ms:** Excellent - Should work with any tunnel
-- **50-100ms:** Good - Should work with decent tunnel
-- **100-200ms:** Warning - May timeout with some tunnels
-- **> 200ms:** Critical - Will likely timeout with Microsoft Graph
-
-If response time > 100ms locally, it will definitely timeout through tunneling. Consider:
-- Using a better tunnel (standard ngrok, Cloudflare Tunnel)
-- Deploying to Azure with public endpoint
-- Using faster machine/network connection
