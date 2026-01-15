@@ -123,10 +123,14 @@ async def create_subscription(
         if not settings.webhook_client_state:
             raise ValueError("WEBHOOK_CLIENT_STATE not configured in .env file")
         
+        # Extract base URL and construct validation endpoint URLs
+        # Use dedicated /graph/validate endpoint for ultra-fast validation responses
+        base_url = settings.webhook_notification_url.rsplit("/webhook/notification", 1)[0]
+        validation_url = f"{base_url}/graph/validate"
+        
         # Determine lifecycle notification URL
         # For Teams messages, lifecycleNotificationUrl is REQUIRED (enforced by guard function)
         # For other resources, include it if expiration > 1 hour
-        base_url = settings.webhook_notification_url.rsplit("/webhook/notification", 1)[0]
         lifecycle_url = f"{base_url}/webhook/lifecycle"
         
         # Detect Teams messages - must match guard function logic
@@ -136,16 +140,16 @@ async def create_subscription(
         
         if is_teams_message:
             # Teams messages ALWAYS require lifecycleNotificationUrl
-            lifecycle_notification_url = lifecycle_url
+            lifecycle_notification_url = validation_url  # Use validation endpoint for lifecycle too
             logger.info(f"Teams message detected - lifecycleNotificationUrl will be included")
         elif expiration_datetime > now + timedelta(hours=1):
             # Other resources only need it if expiration > 1 hour
-            lifecycle_notification_url = lifecycle_url
+            lifecycle_notification_url = validation_url  # Use validation endpoint for lifecycle too
         else:
             lifecycle_notification_url = None
         
         # Log webhook URLs for debugging
-        logger.info(f"Notification URL: {settings.webhook_notification_url}")
+        logger.info(f"Validation URL: {validation_url}")
         logger.info(f"Lifecycle URL: {lifecycle_notification_url if lifecycle_notification_url else 'N/A'}")
         
         # Create subscription
@@ -154,7 +158,7 @@ async def create_subscription(
             subscription = graph_service.create_subscription(
                 resource=request.resource,
                 change_types=request.change_types,  # Guard function will filter if needed
-                notification_url=settings.webhook_notification_url,
+                notification_url=validation_url,  # Use dedicated validation endpoint
                 expiration_datetime=expiration_datetime,
                 lifecycle_notification_url=lifecycle_notification_url
             )

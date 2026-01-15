@@ -1,8 +1,9 @@
 """FastAPI application entry point for Teams-Notion middleware."""
 import logging
 import os
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from urllib.parse import unquote_plus
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware import Middleware
 from fastapi.middleware.gzip import GZipMiddleware
 from routes import webhooks, subscription, diagnostics
@@ -33,6 +34,26 @@ app = FastAPI(
     # Disable unnecessary features for performance
     default_response_class=JSONResponse,
 )
+
+# CRITICAL: Ultra-fast validation endpoint for Microsoft Graph
+# This endpoint MUST be registered BEFORE middleware and routers
+# Zero overhead: no logging, no services, no middleware delays, no JSON handling
+@app.api_route("/graph/validate", methods=["GET", "POST"])
+async def graph_validation(request: Request):
+    """
+    Ultra-fast validation endpoint for Microsoft Graph webhook subscriptions.
+    
+    This endpoint bypasses all middleware, JSON handling, and router overhead.
+    It responds immediately with the validation token in plain text format.
+    
+    Returns:
+        Plain text validation token (exactly as received) for validation requests
+        202 Accepted for non-validation requests
+    """
+    token = request.query_params.get("validationToken")
+    if token:
+        return PlainTextResponse(unquote_plus(token))
+    return PlainTextResponse("", status_code=202)
 
 # Add GZip compression middleware for faster responses
 app.add_middleware(GZipMiddleware, minimum_size=1000)
