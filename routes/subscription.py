@@ -49,19 +49,16 @@ async def list_subscriptions() -> Dict[str, Any]:
 @router.post("/create")
 async def create_subscription(
     request: CreateSubscriptionRequest,
-    pre_warmup: bool = Query(False, description="Explicitly warm up services before creating subscription"),
-    rapid_retry: bool = Query(False, description="Use rapid retry mode (10+ attempts quickly) for network latency issues")
+    pre_warmup: bool = Query(False, description="Explicitly warm up services before creating subscription")
 ) -> Dict[str, Any]:
     """
     Create a new webhook subscription.
     
     Automatically warms up services if token is missing or expiring soon.
-    Uses retry logic with exponential backoff to handle validation timeouts.
     
     Args:
         request: Subscription creation request
         pre_warmup: If True, explicitly warm up services before creating subscription
-        rapid_retry: If True, use rapid retry mode (15 attempts with short delays) for network latency issues
         
     Returns:
         Created subscription data
@@ -151,29 +148,16 @@ async def create_subscription(
         logger.info(f"Notification URL: {settings.webhook_notification_url}")
         logger.info(f"Lifecycle URL: {lifecycle_notification_url if lifecycle_notification_url else 'N/A'}")
         
-        # Use retry logic to handle validation timeouts
+        # Create subscription
         subscription_start = time.time()
         try:
-            # Configure retry strategy based on rapid_retry mode
-            if rapid_retry:
-                logger.info("Using rapid retry mode (15 attempts with short delays) for network latency issues")
-                subscription = graph_service.create_subscription_with_retry(
-                    resource=request.resource,
-                    change_types=request.change_types,  # Guard function will filter if needed
-                    notification_url=settings.webhook_notification_url,
-                    expiration_datetime=expiration_datetime,
-                    lifecycle_notification_url=lifecycle_notification_url,
-                    max_retries=15,
-                    initial_delay=0.5  # Shorter delay for rapid retries
-                )
-            else:
-                subscription = graph_service.create_subscription_with_retry(
-                    resource=request.resource,
-                    change_types=request.change_types,  # Guard function will filter if needed
-                    notification_url=settings.webhook_notification_url,
-                    expiration_datetime=expiration_datetime,
-                    lifecycle_notification_url=lifecycle_notification_url
-                )
+            subscription = graph_service.create_subscription(
+                resource=request.resource,
+                change_types=request.change_types,  # Guard function will filter if needed
+                notification_url=settings.webhook_notification_url,
+                expiration_datetime=expiration_datetime,
+                lifecycle_notification_url=lifecycle_notification_url
+            )
             subscription_time = (time.time() - subscription_start) * 1000
             logger.info(f"Successfully created subscription {subscription.get('id')} for resource {request.resource} in {subscription_time:.2f}ms")
             return subscription
@@ -190,9 +174,8 @@ async def create_subscription(
             if is_validation_timeout:
                 logger.error(
                     f"Subscription validation timeout after {subscription_time:.2f}ms. "
-                    f"This usually means the service was cold or network latency delayed the validation request. "
-                    f"Consider calling /keep-alive/warmup before creating subscriptions, "
-                    f"or using an external keep-alive service."
+                    f"This usually indicates network latency or routing issues. "
+                    f"Check that your webhook endpoint is accessible and responds quickly."
                 )
             else:
                 logger.error(f"Subscription creation failed after {subscription_time:.2f}ms: {error_message}")
