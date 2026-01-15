@@ -1,5 +1,6 @@
 """Microsoft Graph API service for Teams integration."""
 import logging
+import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
 import httpx
@@ -138,6 +139,9 @@ class GraphService:
                 error_detail = error_json.get("error", {}).get("message", error_detail)
                 error_code = error_json.get("error", {}).get("code", "Unknown")
                 
+                # Extract request-id for latency tracking
+                request_id = error_json.get("error", {}).get("innerError", {}).get("request-id")
+                
                 # Check if this is a validation timeout error
                 is_validation_timeout = (
                     error_code == "ValidationError" and 
@@ -147,6 +151,8 @@ class GraphService:
                 # Log full error response for debugging
                 logger.error(f"Graph API full error response: {error_json}")
                 logger.error(f"Graph API error code: {error_code}")
+                if request_id:
+                    logger.error(f"Graph API request-id: {request_id}")
                 
                 # Special logging for validation timeout
                 if is_validation_timeout:
@@ -155,6 +161,14 @@ class GraphService:
                         "This usually indicates the service was cold or network latency delayed the validation request. "
                         "The webhook endpoint may have responded correctly, but too late for Microsoft Graph's timeout window."
                     )
+                    # Store request-id for latency tracking (will be matched when validation arrives)
+                    if request_id and hasattr(self, '_last_subscription_resource'):
+                        from routes.webhooks import _subscription_creation_times
+                        import time
+                        _subscription_creation_times[request_id] = (
+                            time.time(),
+                            getattr(self, '_last_subscription_resource', 'unknown')
+                        )
             except:
                 pass
             
@@ -205,10 +219,20 @@ class GraphService:
             client_state=settings.webhook_client_state,
         )
         
+        # Store resource for latency tracking
+        self._last_subscription_resource = resource
+        self._last_subscription_creation_time = time.time()
+        
         # Log the subscription payload for debugging
         logger.info(f"Creating subscription with payload: {subscription_data}")
         
-        return self._make_request("POST", "/subscriptions", data=subscription_data)
+        try:
+            result = self._make_request("POST", "/subscriptions", data=subscription_data)
+            # If successful, we can't track latency (no request-id in success response)
+            return result
+        except Exception as e:
+            # Error handling in _make_request will store request-id if available
+            raise
     
     def create_subscription_with_retry(
         self,
@@ -217,8 +241,8 @@ class GraphService:
         notification_url: str,
         expiration_datetime: Optional[datetime] = None,
         lifecycle_notification_url: Optional[str] = None,
-        max_retries: int = 3,
-        initial_delay: float = 2.0
+        max_retries: int = 5,
+        initial_delay: float = 1.0
     ) -> Dict[str, Any]:
         """
         Create a webhook subscription with automatic retry on validation timeout.
@@ -250,17 +274,34 @@ class GraphService:
             try:
                 # Before retry (except first attempt), ensure service is warm
                 if attempt > 0:
-                    delay = initial_delay * (2 ** (attempt - 1))
-                    logger.info(f"Retry attempt {attempt + 1}/{max_retries} after {delay:.1f}s delay")
+                    # Use variable delay strategy: shorter delays for rapid retry mode, exponential for normal
+                    if initial_delay < 1.0:
+                        # Rapid retry mode: shorter, more frequent attempts
+                        delay = initial_delay * (1.5 ** (attempt - 1))
+                        delay = min(delay, 2.0)  # Cap at 2 seconds for rapid mode
+                    else:
+                        # Normal mode: exponential backoff
+                        delay = initial_delay * (2 ** (attempt - 1))
+                        delay = min(delay, 10.0)  # Cap at 10 seconds for normal mode
+                    
+                    logger.info(f"Retry attempt {attempt + 1}/{max_retries} after {delay:.2f}s delay")
                     time.sleep(delay)
                     
-                    # Ensure token is fresh before retry
-                    logger.info("Refreshing access token before retry...")
-                    try:
-                        self._get_access_token()
-                        logger.info("Token refreshed successfully")
-                    except Exception as e:
-                        logger.warning(f"Token refresh failed: {str(e)}, will continue anyway")
+                    # Ensure token is fresh before retry (skip for very short delays in rapid mode)
+                    if delay >= 1.0:
+                        logger.info("Refreshing access token before retry...")
+                        try:
+                            self._get_access_token()
+                            logger.info("Token refreshed successfully")
+                        except Exception as e:
+                            logger.warning(f"Token refresh failed: {str(e)}, will continue anyway")
+                    else:
+                        # For rapid retry, just check if token exists
+                        if not self._access_token:
+                            try:
+                                self._get_access_token()
+                            except:
+                                pass
                 
                 # Attempt to create subscription
                 return self.create_subscription(

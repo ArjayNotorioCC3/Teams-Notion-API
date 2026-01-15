@@ -12,6 +12,7 @@ from utils.auth import verify_webhook_client_state
 from datetime import datetime, timezone
 from urllib.parse import unquote
 import re
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,10 @@ router = APIRouter(prefix="/webhook", tags=["webhooks"])
 # Initialize services
 graph_service = GraphService()
 notion_service = NotionService()
+
+# Track subscription creation times for latency analysis
+# Key: request_id from validation token, Value: (subscription_creation_time, resource)
+_subscription_creation_times: Dict[str, Tuple[float, str]] = {}
 
 # Ticket emoji to look for
 TICKET_EMOJI = "🎫"
@@ -336,6 +341,7 @@ async def webhook_notification(request: Request):
     # Access query string directly without converting entire URL to string
     # This must happen BEFORE any async operations (body reading, etc.)
     start_time = time.perf_counter()
+    validation_arrival_time = time.time()
     query_string = request.url.query
     if query_string and "validationToken=" in query_string:
         # Extract token from query string directly (fastest method, no async operations)
@@ -344,13 +350,35 @@ async def webhook_notification(request: Request):
         if token_end == -1:
             token_end = len(query_string)
         
-        validation_token = query_string[token_start:token_end]
-        # URL decode the token
-        validation_token = unquote(validation_token)
+        validation_token = unquote(query_string[token_start:token_end])
+        
+        # Extract request-id from validation token for latency tracking
+        # Format: "Validation: Testing client application reachability for subscription Request-Id: {request-id}"
+        request_id = None
+        if "Request-Id:" in validation_token:
+            try:
+                request_id = validation_token.split("Request-Id:")[-1].strip()
+            except:
+                pass
         
         # Calculate and log response time
         response_time_ms = (time.perf_counter() - start_time) * 1000
         logger.info(f"POST /webhook/notification - Validation request received, response time: {response_time_ms:.2f}ms")
+        
+        # Track network latency if we have request-id and subscription creation time
+        if request_id and request_id in _subscription_creation_times:
+            creation_time, resource = _subscription_creation_times[request_id]
+            network_latency = validation_arrival_time - creation_time
+            network_latency_ms = network_latency * 1000
+            logger.warning(
+                f"NETWORK LATENCY DETECTED: Validation request arrived {network_latency_ms:.2f}ms "
+                f"({network_latency:.2f}s) after subscription creation for resource: {resource}. "
+                f"Request-ID: {request_id}"
+            )
+            # Clean up old entry
+            del _subscription_creation_times[request_id]
+        elif request_id:
+            logger.info(f"Validation request received with Request-ID: {request_id} (no matching subscription creation found)")
         
         # Warn if response time is slow
         if response_time_ms > 100:

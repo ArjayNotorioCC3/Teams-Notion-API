@@ -49,7 +49,8 @@ async def list_subscriptions() -> Dict[str, Any]:
 @router.post("/create")
 async def create_subscription(
     request: CreateSubscriptionRequest,
-    pre_warmup: bool = Query(False, description="Explicitly warm up services before creating subscription")
+    pre_warmup: bool = Query(False, description="Explicitly warm up services before creating subscription"),
+    rapid_retry: bool = Query(False, description="Use rapid retry mode (10+ attempts quickly) for network latency issues")
 ) -> Dict[str, Any]:
     """
     Create a new webhook subscription.
@@ -60,6 +61,7 @@ async def create_subscription(
     Args:
         request: Subscription creation request
         pre_warmup: If True, explicitly warm up services before creating subscription
+        rapid_retry: If True, use rapid retry mode (15 attempts with short delays) for network latency issues
         
     Returns:
         Created subscription data
@@ -152,13 +154,26 @@ async def create_subscription(
         # Use retry logic to handle validation timeouts
         subscription_start = time.time()
         try:
-            subscription = graph_service.create_subscription_with_retry(
-                resource=request.resource,
-                change_types=request.change_types,  # Guard function will filter if needed
-                notification_url=settings.webhook_notification_url,
-                expiration_datetime=expiration_datetime,
-                lifecycle_notification_url=lifecycle_notification_url
-            )
+            # Configure retry strategy based on rapid_retry mode
+            if rapid_retry:
+                logger.info("Using rapid retry mode (15 attempts with short delays) for network latency issues")
+                subscription = graph_service.create_subscription_with_retry(
+                    resource=request.resource,
+                    change_types=request.change_types,  # Guard function will filter if needed
+                    notification_url=settings.webhook_notification_url,
+                    expiration_datetime=expiration_datetime,
+                    lifecycle_notification_url=lifecycle_notification_url,
+                    max_retries=15,
+                    initial_delay=0.5  # Shorter delay for rapid retries
+                )
+            else:
+                subscription = graph_service.create_subscription_with_retry(
+                    resource=request.resource,
+                    change_types=request.change_types,  # Guard function will filter if needed
+                    notification_url=settings.webhook_notification_url,
+                    expiration_datetime=expiration_datetime,
+                    lifecycle_notification_url=lifecycle_notification_url
+                )
             subscription_time = (time.time() - subscription_start) * 1000
             logger.info(f"Successfully created subscription {subscription.get('id')} for resource {request.resource} in {subscription_time:.2f}ms")
             return subscription

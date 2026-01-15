@@ -110,15 +110,25 @@ Set `WEBHOOK_NOTIFICATION_URL` to your public endpoint. For Azure VM deployment,
 
 ## Running the Application
 
-### Local Development
+### Local Testing
 
+For detailed local testing instructions, see **[LOCAL_TESTING.md](LOCAL_TESTING.md)**.
+
+Quick start:
 ```bash
 # Activate virtual environment
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
+# Install dependencies
+pip install -r requirements.txt
+
+# Create .env file with your credentials (see LOCAL_TESTING.md)
+
 # Run development server
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+**Note**: For webhook testing, you'll need a public URL. See [LOCAL_TESTING.md](LOCAL_TESTING.md) for options (ngrok, Cloudflare Tunnel, etc.).
 
 ### Production (Azure VM)
 
