@@ -30,6 +30,40 @@ _subscription_creation_times: Dict[str, Tuple[float, str]] = {}
 TICKET_EMOJI = "🎫"
 
 
+@router.api_route("", methods=["GET", "POST"])
+async def webhook_root(request: Request):
+    """
+    Root webhook endpoint for Microsoft Graph validation.
+    
+    Microsoft Graph may validate at /webhook instead of /webhook/notification.
+    This endpoint catches those validation requests and responds immediately.
+    
+    CRITICAL: Must respond in < 2 seconds to avoid validation timeout.
+    Optimized for fastest possible response - no logging, no processing.
+    """
+    # Check for validation token in query string (fastest method)
+    query_string = request.url.query
+    if query_string and "validationToken=" in query_string:
+        # Extract token directly (no URL decode needed - Graph accepts encoded)
+        token_start = query_string.find("validationToken=") + len("validationToken=")
+        token_end = query_string.find("&", token_start)
+        if token_end == -1:
+            token_end = len(query_string)
+        
+        validation_token = query_string[token_start:token_end]
+        
+        # Return immediately - no processing, no logging overhead
+        return PlainTextResponse(content=validation_token, status_code=200)
+    
+    # Fallback to query_params
+    validation_token = request.query_params.get("validationToken")
+    if validation_token:
+        return PlainTextResponse(content=validation_token, status_code=200)
+    
+    # If no validation token, return 404 (not a valid endpoint for notifications)
+    raise HTTPException(status_code=404, detail="Use /webhook/notification or /webhook/lifecycle for notifications")
+
+
 def extract_team_channel_from_resource(resource: str) -> Optional[Tuple[str, str, str]]:
     """
     Extract team ID and channel ID from resource URL.
@@ -357,7 +391,7 @@ async def webhook_notification(request: Request):
         request_id = None
         if "Request-Id:" in validation_token:
             try:
-                request_id = validation_token.split("Request-Id:")[-1].strip()
+                request_id = validation_token.split("Request-Id:")[-1].strip().lstrip('+')
             except:
                 pass
         
