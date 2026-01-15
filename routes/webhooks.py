@@ -39,7 +39,7 @@ async def webhook_root(request: Request):
     This endpoint catches those validation requests and responds immediately.
     
     CRITICAL: Must respond in < 2 seconds to avoid validation timeout.
-    Optimized for fastest possible response - no logging, no processing.
+    Optimized for fastest possible response.
     """
     # Check for validation token in query string (fastest method)
     query_string = request.url.query
@@ -52,12 +52,16 @@ async def webhook_root(request: Request):
         
         validation_token = query_string[token_start:token_end]
         
-        # Return immediately - no processing, no logging overhead
+        # Log for debugging (minimal overhead)
+        logger.info(f"POST /webhook (root) - Validation request received")
+        
+        # Return immediately
         return PlainTextResponse(content=validation_token, status_code=200)
     
     # Fallback to query_params
     validation_token = request.query_params.get("validationToken")
     if validation_token:
+        logger.info(f"POST /webhook (root) - Validation request received (fallback)")
         return PlainTextResponse(content=validation_token, status_code=200)
     
     # If no validation token, return 404 (not a valid endpoint for notifications)
