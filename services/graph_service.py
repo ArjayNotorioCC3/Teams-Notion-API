@@ -284,6 +284,9 @@ class GraphService:
         """
         Get a Teams channel message with full details including reactions.
         
+        Note: Reactions are included by default in the chatMessage response.
+        We use $select to explicitly request reactions along with other needed fields.
+        
         Args:
             team_id: Team ID
             channel_id: Channel ID
@@ -293,8 +296,11 @@ class GraphService:
             Message object with reactions
         """
         endpoint = f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}"
-        # Expand reactions to get full details
-        params = {"$expand": "reactions"}
+        # Select fields including reactions (reactions cannot be expanded, but are included by default)
+        # Explicitly select fields we need to ensure reactions are included
+        params = {
+            "$select": "id,messageType,createdDateTime,lastModifiedDateTime,subject,body,from,reactions,attachments,channelIdentity"
+        }
         
         data = self._make_request("GET", endpoint, params=params)
         return GraphMessage(**data)

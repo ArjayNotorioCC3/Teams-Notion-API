@@ -44,18 +44,28 @@ def extract_team_channel_from_resource(resource: str) -> Optional[Tuple[str, str
     Returns:
         Tuple of (team_id, channel_id, message_id) or None if parsing fails
     """
+    # Debug: Log the exact resource format received
+    logger.debug(f"Parsing resource: {resource[:200]}...")  # Log first 200 chars to avoid huge logs
+    
     # Try standard format first: /teams/{teamId}/channels/{channelId}/messages/{messageId}
     pattern1 = r"/teams/([^/]+)/channels/([^/]+)/messages/([^/]+)"
-    match = re.search(pattern1, resource)
+    match = re.search(pattern1, resource, re.IGNORECASE)
     if match:
-        return match.group(1), match.group(2), match.group(3)
+        team_id, channel_id, message_id = match.group(1), match.group(2), match.group(3)
+        logger.debug(f"Parsed resource (standard format): team={team_id}, channel={channel_id}, message={message_id}")
+        return team_id, channel_id, message_id
     
     # Try Graph notification format: teams('{teamId}')/channels('{channelId}')/messages('{messageId}')
-    pattern2 = r"teams\('([^']+)'\)/channels\('([^']+)'\)/messages\('([^']+)'\)"
-    match = re.search(pattern2, resource)
+    # Make pattern more flexible to handle optional whitespace and case variations
+    pattern2 = r"teams\s*\(\s*'([^']+)'\s*\)\s*/channels\s*\(\s*'([^']+)'\s*\)\s*/messages\s*\(\s*'([^']+)'\s*\)"
+    match = re.search(pattern2, resource, re.IGNORECASE)
     if match:
-        return match.group(1), match.group(2), match.group(3)
+        team_id, channel_id, message_id = match.group(1), match.group(2), match.group(3)
+        logger.debug(f"Parsed resource (Graph format): team={team_id}, channel={channel_id}, message={message_id}")
+        return team_id, channel_id, message_id
     
+    # If both patterns fail, log the resource for debugging
+    logger.warning(f"Failed to parse resource with both patterns. Resource: {resource}")
     return None
 
 
