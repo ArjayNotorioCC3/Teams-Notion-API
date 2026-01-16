@@ -453,13 +453,17 @@ async def webhook_notification(request: Request):
                 logger.warning(f"Invalid client state in notification: {change.clientState}")
                 continue
             
+            # Log the change type and resource for debugging
+            logger.info(f"Processing change notification: changeType={change.changeType}, resource={change.resource}")
+            
             # Check if this is a message-related change (handles both formats)
             if "/messages" in change.resource or "messages(" in change.resource:
                 if change.changeType in ["created", "updated"]:
+                    logger.info(f"Message {change.changeType} detected - processing for reactions...")
                     # Process message reaction
                     await process_message_reaction(change)
                 else:
-                    logger.debug(f"Ignoring change type: {change.changeType}")
+                    logger.info(f"Ignoring change type: {change.changeType} for resource: {change.resource}")
             else:
                 logger.debug(f"Ignoring non-message resource: {change.resource}")
                 
