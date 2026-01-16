@@ -190,27 +190,32 @@ async def poll_messages_for_reactions():
             if not messages_to_check:
                 continue
             
-            logger.debug(f"Polling {len(messages_to_check)} message(s) for reactions...")
+            logger.info(f"Polling {len(messages_to_check)} message(s) for reactions...")
             
             # Check each message
             for (team_id, channel_id, message_id), created_time in messages_to_check:
                 # Remove old messages (older than retention period)
                 if current_time - created_time > MESSAGE_POLL_RETENTION:
-                    logger.debug(f"Removing old message {message_id} from polling queue (age: {current_time - created_time:.0f}s)")
+                    logger.info(f"Removing old message {message_id} from polling queue (age: {current_time - created_time:.0f}s)")
                     _recent_messages.pop((team_id, channel_id, message_id), None)
                     continue
                 
                 try:
                     # Fetch message to check for reactions
+                    logger.debug(f"Polling message {message_id} for reactions...")
                     message = graph_service.get_message(team_id, channel_id, message_id)
                     
                     # Check for ticket emoji reaction
                     ticket_reaction = None
                     if message.reactions:
+                        logger.info(f"Message {message_id} has {len(message.reactions)} reaction(s) during polling")
                         for reaction in message.reactions:
+                            logger.debug(f"Found reaction type: {reaction.reactionType}")
                             if reaction.reactionType == TICKET_EMOJI:
                                 ticket_reaction = reaction
                                 break
+                    else:
+                        logger.debug(f"Message {message_id} has no reactions during polling")
                     
                     if ticket_reaction:
                         logger.info(f"Polling detected ticket emoji (🎫) reaction on message {message_id}")
@@ -222,8 +227,31 @@ async def poll_messages_for_reactions():
                         try:
                             # Get user who added the reaction
                             reacting_user = ticket_reaction.user
-                            reacting_user_email = reacting_user.get("userIdentity", {}).get("id") or \
-                                                 reacting_user.get("id")
+                            if not reacting_user:
+                                logger.warning(f"Reaction user object is None for message {message_id}")
+                                continue
+                            
+                            # Try different ways to extract user email/ID
+                            reacting_user_email = None
+                            if isinstance(reacting_user, dict):
+                                # Try userIdentity.id first
+                                user_identity = reacting_user.get("userIdentity", {})
+                                if isinstance(user_identity, dict):
+                                    reacting_user_email = user_identity.get("id") or user_identity.get("displayName")
+                                
+                                # Fallback to direct id
+                                if not reacting_user_email:
+                                    reacting_user_email = reacting_user.get("id")
+                                
+                                # Try other possible fields
+                                if not reacting_user_email:
+                                    reacting_user_email = reacting_user.get("mail") or reacting_user.get("userPrincipalName")
+                            
+                            if not reacting_user_email:
+                                logger.warning(f"Could not extract user email from reaction: {reacting_user}")
+                                continue
+                            
+                            logger.info(f"Extracted reacting user: {reacting_user_email}")
                             
                             # Check if user is allowed
                             if not is_user_allowed(reacting_user_email):
@@ -366,8 +394,31 @@ async def process_message_reaction(notification: ChangeNotification) -> None:
         
         # Get user who added the reaction
         reacting_user = ticket_reaction.user
-        reacting_user_email = reacting_user.get("userIdentity", {}).get("id") or \
-                             reacting_user.get("id")
+        if not reacting_user:
+            logger.warning(f"Reaction user object is None for message {message_id}")
+            return
+        
+        # Try different ways to extract user email/ID
+        reacting_user_email = None
+        if isinstance(reacting_user, dict):
+            # Try userIdentity.id first
+            user_identity = reacting_user.get("userIdentity", {})
+            if isinstance(user_identity, dict):
+                reacting_user_email = user_identity.get("id") or user_identity.get("displayName")
+            
+            # Fallback to direct id
+            if not reacting_user_email:
+                reacting_user_email = reacting_user.get("id")
+            
+            # Try other possible fields
+            if not reacting_user_email:
+                reacting_user_email = reacting_user.get("mail") or reacting_user.get("userPrincipalName")
+        
+        if not reacting_user_email:
+            logger.warning(f"Could not extract user email from reaction: {reacting_user}")
+            return
+        
+        logger.info(f"Extracted reacting user: {reacting_user_email}")
         
         # Check if user is allowed
         if not is_user_allowed(reacting_user_email):
