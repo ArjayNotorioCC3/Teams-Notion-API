@@ -164,9 +164,6 @@ class NotionService:
         if status is None:
             status = settings.default_ticket_status
         
-        # Format attachments as a single string or rich text
-        attachments_text = "\n".join(attachments) if attachments else ""
-        
         # Format approved_at timestamp
         approved_at_iso = approved_at.isoformat()
         last_synced_iso = datetime.now(timezone.utc).isoformat()
@@ -192,15 +189,15 @@ class NotionService:
                 ]
             },
             "Status": {
-                "select": {
+                "status": {
                     "name": status
                 }
             },
             "Requester": {
-                "rich_text": [
+                "people": [
                     {
-                        "text": {
-                            "content": requester_name or requester_email
+                        "person": {
+                            "email": requester_email
                         }
                     }
                 ]
@@ -223,20 +220,14 @@ class NotionService:
                     }
                 ]
             },
-            "Attachments (URL)": {
-                "rich_text": [
-                    {
-                        "text": {
-                            "content": attachments_text[:2000] if attachments_text else "None"
-                        }
-                    }
-                ]
+            "Attachments": {
+                "url": attachments[0] if attachments else None
             },
             "Approved By": {
-                "rich_text": [
+                "people": [
                     {
-                        "text": {
-                            "content": approved_by_name or approved_by_email
+                        "person": {
+                            "email": approved_by_email
                         }
                     }
                 ]
