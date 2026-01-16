@@ -38,7 +38,87 @@ class NotionService:
             timeout=TIMEOUT
         )
         
+        # Cache for Notion user IDs (email -> user_id mapping)
+        self._user_id_cache: Dict[str, str] = {}
+        
         logger.info(f"NotionService initialized with connection pooling (max={CONNECTION_LIMIT})")
+    
+    def _get_user_id_by_email(self, email: str) -> Optional[str]:
+        """
+        Get Notion user ID by email address.
+        
+        Lists Notion workspace users and finds matching email.
+        Results are cached for performance.
+        
+        Args:
+            email: User email address (case-insensitive)
+            
+        Returns:
+            Notion user ID or None if not found
+        """
+        email_lower = email.lower()
+        
+        # Check cache first
+        if email_lower in self._user_id_cache:
+            return self._user_id_cache[email_lower]
+        
+        try:
+            # List all users in the workspace
+            response = self._make_request("GET", "/users")
+            users = response.get("results", [])
+            
+            # Search for user by email (case-insensitive)
+            for user in users:
+                user_email = None
+                if user.get("type") == "person":
+                    person = user.get("person", {})
+                    user_email = person.get("email", "").lower()
+                elif user.get("type") == "bot":
+                    # Skip bots
+                    continue
+                
+                if user_email == email_lower:
+                    user_id = user.get("id")
+                    if user_id:
+                        # Cache the result
+                        self._user_id_cache[email_lower] = user_id
+                        logger.debug(f"Found Notion user ID for {email}: {user_id}")
+                        return user_id
+            
+            logger.warning(f"Notion user not found for email: {email}")
+            return None
+        except Exception as e:
+            logger.warning(f"Could not get Notion user ID for {email}: {str(e)}")
+            return None
+    
+    def _build_people_property(self, email: str) -> Dict[str, Any]:
+        """
+        Build a Notion people property from an email address.
+        
+        Attempts to find the Notion user ID by email. If not found,
+        returns an empty people array (property will be empty).
+        
+        Args:
+            email: User email address
+            
+        Returns:
+            Notion people property dictionary
+        """
+        user_id = self._get_user_id_by_email(email)
+        if user_id:
+            return {
+                "people": [
+                    {
+                        "id": user_id
+                    }
+                ]
+            }
+        else:
+            # Return empty people array if user not found
+            logger.warning(f"Could not find Notion user for {email}, leaving people property empty")
+            return {
+                "people": []
+            }
     
     def __del__(self):
         """Cleanup httpx client on destruction."""
@@ -193,15 +273,7 @@ class NotionService:
                     "name": status
                 }
             },
-            "Requester": {
-                "people": [
-                    {
-                        "person": {
-                            "email": requester_email
-                        }
-                    }
-                ]
-            },
+            "Requester": self._build_people_property(requester_email),
             "Teams Message ID": {
                 "rich_text": [
                     {
@@ -223,15 +295,7 @@ class NotionService:
             "Attachments": {
                 "url": attachments[0] if attachments else None
             },
-            "Approved By": {
-                "people": [
-                    {
-                        "person": {
-                            "email": approved_by_email
-                        }
-                    }
-                ]
-            },
+            "Approved By": self._build_people_property(approved_by_email),
             "Approved At": {
                 "date": {
                     "start": approved_at_iso
