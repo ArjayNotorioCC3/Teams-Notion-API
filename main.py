@@ -37,23 +37,36 @@ app = FastAPI(
 
 # CRITICAL: Ultra-fast validation endpoint for Microsoft Graph
 # This endpoint MUST be registered BEFORE middleware and routers
-# Zero overhead: no logging, no services, no middleware delays, no JSON handling
+# Zero overhead for validation: no logging, no services, no middleware delays
 @app.api_route("/graph/validate", methods=["GET", "POST"])
 async def graph_validation(request: Request):
     """
     Ultra-fast validation endpoint for Microsoft Graph webhook subscriptions.
     
-    This endpoint bypasses all middleware, JSON handling, and router overhead.
-    It responds immediately with the validation token in plain text format.
+    This endpoint bypasses all middleware, JSON handling, and router overhead for validation.
+    It responds immediately with the decoded validation token in plain text format.
+    For actual notifications, it forwards to the webhook notification handler.
     
     Returns:
-        Plain text validation token (exactly as received) for validation requests
-        202 Accepted for non-validation requests
+        Plain text validation token (decoded) for validation requests
+        Processed response from webhook handler for actual notifications
     """
+    # CRITICAL: Check for validation token FIRST - fastest path possible
+    # FastAPI's query_params.get() automatically decodes, but unquote_plus ensures it
     token = request.query_params.get("validationToken")
     if token:
-        return PlainTextResponse(unquote_plus(token))
-    return PlainTextResponse("", status_code=202)
+        # Return decoded token immediately - NO logging, NO processing, NO delays
+        # This is the critical path that must be <1ms
+        return PlainTextResponse(unquote_plus(token), media_type="text/plain")
+    
+    # If no validation token, this is an actual notification
+    # Forward to webhook notification handler for processing
+    # Import here to avoid circular imports and keep validation path fast
+    from routes.webhooks import webhook_notification
+    
+    # Forward the request to the webhook notification handler
+    # This allows notifications to be processed while keeping validation ultra-fast
+    return await webhook_notification(request)
 
 # Add GZip compression middleware for faster responses
 app.add_middleware(GZipMiddleware, minimum_size=1000)

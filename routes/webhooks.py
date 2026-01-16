@@ -10,7 +10,7 @@ from services.notion_service import NotionService
 from utils.validation import is_user_allowed
 from utils.auth import verify_webhook_client_state
 from datetime import datetime, timezone
-from urllib.parse import unquote
+from urllib.parse import unquote, unquote_plus
 import re
 from collections import defaultdict
 
@@ -304,8 +304,8 @@ async def webhook_lifecycle(request: Request):
             token_end = len(query_string)
         
         validation_token = query_string[token_start:token_end]
-        # URL decode the token
-        validation_token = unquote(validation_token)
+        # URL decode the token (use unquote_plus to handle + as spaces)
+        validation_token = unquote_plus(validation_token)
         
         # Calculate and log response time
         response_time_ms = (time.perf_counter() - start_time) * 1000
@@ -388,7 +388,7 @@ async def webhook_notification(request: Request):
         if token_end == -1:
             token_end = len(query_string)
         
-        validation_token = unquote(query_string[token_start:token_end])
+        validation_token = unquote_plus(query_string[token_start:token_end])
         
         # Extract request-id from validation token for latency tracking
         # Format: "Validation: Testing client application reachability for subscription Request-Id: {request-id}"
