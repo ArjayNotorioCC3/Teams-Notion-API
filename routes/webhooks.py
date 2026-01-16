@@ -30,6 +30,108 @@ _subscription_creation_times: Dict[str, Tuple[float, str]] = {}
 TICKET_EMOJI = "🎫"
 
 
+def extract_team_channel_from_resource(resource: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Extract team ID, channel ID, and message ID from resource URL.
+    
+    Microsoft Graph sends resources in two formats:
+    1. Standard format: /teams/{teamId}/channels/{channelId}/messages/{messageId}
+    2. Notification format: teams('{teamId}')/channels('{channelId}')/messages('{messageId}')
+    
+    Args:
+        resource: Resource URL from webhook notification
+        
+    Returns:
+        Tuple of (team_id, channel_id, message_id) or None if parsing fails
+    """
+    # Try standard format first: /teams/{teamId}/channels/{channelId}/messages/{messageId}
+    pattern1 = r"/teams/([^/]+)/channels/([^/]+)/messages/([^/]+)"
+    match = re.search(pattern1, resource)
+    if match:
+        return match.group(1), match.group(2), match.group(3)
+    
+    # Try Graph notification format: teams('{teamId}')/channels('{channelId}')/messages('{messageId}')
+    pattern2 = r"teams\('([^']+)'\)/channels\('([^']+)'\)/messages\('([^']+)'\)"
+    match = re.search(pattern2, resource)
+    if match:
+        return match.group(1), match.group(2), match.group(3)
+    
+    return None
+
+
+def extract_validation_token(request: Request, start_time: Optional[float] = None) -> Tuple[Optional[str], Optional[float]]:
+    """
+    Extract validation token from request query string.
+    
+    This is the fastest method for validation token extraction, checking query string
+    directly before falling back to query_params. Used by all validation endpoints.
+    
+    Args:
+        request: FastAPI Request object
+        start_time: Optional start time for performance measurement
+        
+    Returns:
+        Tuple of (validation_token, response_time_ms) or (None, None) if no token found
+    """
+    if start_time is None:
+        start_time = time.perf_counter()
+    
+    query_string = request.url.query
+    if query_string and "validationToken=" in query_string:
+        # Extract token from query string directly (fastest method)
+        token_start = query_string.find("validationToken=") + len("validationToken=")
+        token_end = query_string.find("&", token_start)
+        if token_end == -1:
+            token_end = len(query_string)
+        
+        validation_token = unquote_plus(query_string[token_start:token_end])
+        response_time_ms = (time.perf_counter() - start_time) * 1000
+        return validation_token, response_time_ms
+    
+    # Fallback to query_params
+    validation_token = request.query_params.get("validationToken")
+    if validation_token:
+        validation_token = unquote_plus(validation_token)
+        response_time_ms = (time.perf_counter() - start_time) * 1000
+        return validation_token, response_time_ms
+    
+    return None, None
+
+
+async def parse_notification_body(request: Request) -> Tuple[Optional[Notification], Optional[Response]]:
+    """
+    Parse notification body from request.
+    
+    Handles empty bodies, JSON parsing, and error cases gracefully.
+    Returns 202 Accepted for empty bodies or parsing errors to avoid Graph blacklisting.
+    
+    Args:
+        request: FastAPI Request object
+        
+    Returns:
+        Tuple of (notification, error_response):
+        - If successful: (Notification object, None)
+        - If empty body: (None, 202 Response)
+        - If parsing error: (None, 202 Response)
+    """
+    try:
+        body = await request.body()
+        if not body:
+            # Microsoft Graph sometimes sends empty POSTs during reachability checks
+            # NEVER return 4xx here - Graph treats ANY 4xx as validation failure
+            return None, PlainTextResponse("OK", status_code=202)
+        
+        notification_data = await request.json()
+        notification = Notification(**notification_data)
+        return notification, None
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to parse notification: {str(e)}")
+        # Even for parsing errors, return 202 to avoid Graph blacklisting
+        return None, PlainTextResponse("OK", status_code=202)
+
+
 @router.api_route("", methods=["GET", "POST"])
 async def webhook_root(request: Request):
     """
@@ -41,49 +143,13 @@ async def webhook_root(request: Request):
     CRITICAL: Must respond in < 2 seconds to avoid validation timeout.
     Optimized for fastest possible response.
     """
-    # Check for validation token in query string (fastest method)
-    query_string = request.url.query
-    if query_string and "validationToken=" in query_string:
-        # Extract token directly (no URL decode needed - Graph accepts encoded)
-        token_start = query_string.find("validationToken=") + len("validationToken=")
-        token_end = query_string.find("&", token_start)
-        if token_end == -1:
-            token_end = len(query_string)
-        
-        validation_token = query_string[token_start:token_end]
-        
-        # Log for debugging (minimal overhead)
-        logger.info(f"POST /webhook (root) - Validation request received")
-        
-        # Return immediately
-        return PlainTextResponse(content=validation_token, status_code=200)
-    
-    # Fallback to query_params
-    validation_token = request.query_params.get("validationToken")
+    validation_token, response_time_ms = extract_validation_token(request)
     if validation_token:
-        logger.info(f"POST /webhook (root) - Validation request received (fallback)")
+        logger.info(f"POST /webhook (root) - Validation request received, response time: {response_time_ms:.2f}ms")
         return PlainTextResponse(content=validation_token, status_code=200)
     
     # If no validation token, return 404 (not a valid endpoint for notifications)
     raise HTTPException(status_code=404, detail="Use /webhook/notification or /webhook/lifecycle for notifications")
-
-
-def extract_team_channel_from_resource(resource: str) -> Optional[Tuple[str, str, str]]:
-    """
-    Extract team ID and channel ID from resource URL.
-    
-    Args:
-        resource: Resource URL from webhook notification
-        
-    Returns:
-        Tuple of (team_id, channel_id) or None if parsing fails
-    """
-    # Resource format: /teams/{teamId}/channels/{channelId}/messages/{messageId}
-    pattern = r"/teams/([^/]+)/channels/([^/]+)/messages/([^/]+)"
-    match = re.search(pattern, resource)
-    if match:
-        return match.group(1), match.group(2), match.group(3)
-    return None
 
 
 async def process_message_reaction(notification: ChangeNotification) -> None:
@@ -234,17 +300,8 @@ def webhook_validation(validationToken: Optional[str] = None):
     Returns:
         Validation token as plain text
     """
-    start_time = time.perf_counter()
-    
     if validationToken:
-        # Calculate response time in milliseconds
-        response_time_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(f"GET /webhook/validation - Validation request received, response time: {response_time_ms:.2f}ms")
-        
-        # Warn if response time is slow
-        if response_time_ms > 100:
-            logger.warning(f"GET /webhook/validation - Slow response time: {response_time_ms:.2f}ms (should be < 100ms)")
-        
+        logger.info(f"GET /webhook/validation - Validation request received")
         return PlainTextResponse(content=validationToken, status_code=200)
     else:
         raise HTTPException(status_code=400, detail="Missing validationToken")
@@ -264,17 +321,8 @@ def webhook_lifecycle_validation(validationToken: Optional[str] = None) -> Respo
     Returns:
         Validation token as plain text
     """
-    start_time = time.perf_counter()
-    
     if validationToken:
-        # Calculate response time in milliseconds
-        response_time_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(f"GET /webhook/lifecycle/validation - Validation request received, response time: {response_time_ms:.2f}ms")
-        
-        # Warn if response time is slow
-        if response_time_ms > 100:
-            logger.warning(f"GET /webhook/lifecycle/validation - Slow response time: {response_time_ms:.2f}ms (should be < 100ms)")
-        
+        logger.info(f"GET /webhook/lifecycle/validation - Validation request received")
         return PlainTextResponse(content=validationToken, status_code=200)
     else:
         raise HTTPException(status_code=400, detail="Missing validationToken")
@@ -292,58 +340,18 @@ async def webhook_lifecycle(request: Request):
     Returns:
         Success response or validation token
     """
-    # CRITICAL: Check validation token FIRST using fastest method possible
-    # Access query string directly without converting entire URL to string
     start_time = time.perf_counter()
-    query_string = request.url.query
-    if query_string and "validationToken=" in query_string:
-        # Extract token from query string directly (fastest method, no async operations)
-        token_start = query_string.find("validationToken=") + len("validationToken=")
-        token_end = query_string.find("&", token_start)
-        if token_end == -1:
-            token_end = len(query_string)
-        
-        validation_token = query_string[token_start:token_end]
-        # URL decode the token (use unquote_plus to handle + as spaces)
-        validation_token = unquote_plus(validation_token)
-        
-        # Calculate and log response time
-        response_time_ms = (time.perf_counter() - start_time) * 1000
+    validation_token, response_time_ms = extract_validation_token(request, start_time)
+    if validation_token:
         logger.info(f"POST /webhook/lifecycle - Validation request received, response time: {response_time_ms:.2f}ms")
-        
-        # Warn if response time is slow
         if response_time_ms > 100:
             logger.warning(f"POST /webhook/lifecycle - Slow validation response time: {response_time_ms:.2f}ms (should be < 100ms)")
-        
-        # Return immediately - NO async operations, NO body reading, NO processing
-        # Microsoft Graph requires response in < 2 seconds
         return PlainTextResponse(content=validation_token, status_code=200)
     
-    # Fallback to query_params if query string parsing didn't find it (shouldn't happen, but safe)
-    validation_token = request.query_params.get("validationToken")
-    if validation_token:
-        # Calculate and log response time
-        response_time_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(f"POST /webhook/lifecycle (fallback) - Validation request received, response time: {response_time_ms:.2f}ms")
-        
-        return PlainTextResponse(content=validation_token, status_code=200)
-    
-    # Otherwise, parse as notification
-    try:
-        body = await request.body()
-        if not body:
-            # CRITICAL: Microsoft Graph sometimes sends empty POSTs during reachability checks
-            # NEVER return 4xx here - Graph treats ANY 4xx as validation failure
-            return PlainTextResponse("OK", status_code=202)
-        
-        notification_data = await request.json()
-        notification = Notification(**notification_data)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to parse lifecycle notification: {str(e)}")
-        # Even for parsing errors, return 202 to avoid Graph blacklisting
-        return PlainTextResponse("OK", status_code=202)
+    # Parse notification body
+    notification, error_response = await parse_notification_body(request)
+    if error_response:
+        return error_response
     
     logger.info(f"Received lifecycle notification with {len(notification.value)} change(s)")
     
@@ -375,21 +383,11 @@ async def webhook_notification(request: Request):
     Returns:
         Success response or validation token
     """
-    # CRITICAL: Check validation token FIRST using fastest method possible
-    # Access query string directly without converting entire URL to string
-    # This must happen BEFORE any async operations (body reading, etc.)
     start_time = time.perf_counter()
     validation_arrival_time = time.time()
-    query_string = request.url.query
-    if query_string and "validationToken=" in query_string:
-        # Extract token from query string directly (fastest method, no async operations)
-        token_start = query_string.find("validationToken=") + len("validationToken=")
-        token_end = query_string.find("&", token_start)
-        if token_end == -1:
-            token_end = len(query_string)
-        
-        validation_token = unquote_plus(query_string[token_start:token_end])
-        
+    validation_token, response_time_ms = extract_validation_token(request, start_time)
+    
+    if validation_token:
         # Extract request-id from validation token for latency tracking
         # Format: "Validation: Testing client application reachability for subscription Request-Id: {request-id}"
         request_id = None
@@ -399,8 +397,6 @@ async def webhook_notification(request: Request):
             except:
                 pass
         
-        # Calculate and log response time
-        response_time_ms = (time.perf_counter() - start_time) * 1000
         logger.info(f"POST /webhook/notification - Validation request received, response time: {response_time_ms:.2f}ms")
         
         # Track network latency if we have request-id and subscription creation time
@@ -418,40 +414,15 @@ async def webhook_notification(request: Request):
         elif request_id:
             logger.info(f"Validation request received with Request-ID: {request_id} (no matching subscription creation found)")
         
-        # Warn if response time is slow
         if response_time_ms > 100:
             logger.warning(f"POST /webhook/notification - Slow validation response time: {response_time_ms:.2f}ms (should be < 100ms)")
         
-        # Return immediately - NO async operations, NO body reading, NO processing
-        # Microsoft Graph requires response in < 2 seconds
         return PlainTextResponse(content=validation_token, status_code=200)
     
-    # Fallback to query_params if query string parsing didn't find it (shouldn't happen, but safe)
-    validation_token = request.query_params.get("validationToken")
-    if validation_token:
-        # Calculate and log response time
-        response_time_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(f"POST /webhook/notification (fallback) - Validation request received, response time: {response_time_ms:.2f}ms")
-        
-        return PlainTextResponse(content=validation_token, status_code=200)
-    
-    # Otherwise, parse as notification
-    try:
-        body = await request.body()
-        if not body:
-            # CRITICAL: Microsoft Graph sometimes sends empty POSTs during reachability checks
-            # NEVER return 4xx here - Graph treats ANY 4xx as validation failure
-            # Return 202 Accepted to indicate we received the request
-            return PlainTextResponse("OK", status_code=202)
-        
-        notification_data = await request.json()
-        notification = Notification(**notification_data)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to parse notification: {str(e)}")
-        # Even for parsing errors, return 202 to avoid Graph blacklisting
-        return PlainTextResponse("OK", status_code=202)
+    # Parse notification body
+    notification, error_response = await parse_notification_body(request)
+    if error_response:
+        return error_response
     
     logger.info(f"Received webhook notification with {len(notification.value)} change(s)")
     
@@ -467,8 +438,8 @@ async def webhook_notification(request: Request):
                 logger.warning(f"Invalid client state in notification: {change.clientState}")
                 continue
             
-            # Check if this is a message-related change
-            if "/messages" in change.resource:
+            # Check if this is a message-related change (handles both formats)
+            if "/messages" in change.resource or "messages(" in change.resource:
                 if change.changeType in ["created", "updated"]:
                     # Process message reaction
                     await process_message_reaction(change)
