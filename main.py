@@ -112,6 +112,14 @@ async def startup_event():
     # Initialize NotionService
     logger.info("Initializing NotionService...")
     logger.info("NotionService initialized")
+    
+    # Start background task for polling messages for reactions
+    # (Microsoft Graph doesn't send "updated" notifications when reactions are added)
+    logger.info("Starting background reaction polling task...")
+    from routes.webhooks import poll_messages_for_reactions
+    import asyncio
+    asyncio.create_task(poll_messages_for_reactions())
+    logger.info("Reaction polling task started (checking every 30 seconds)")
 
 
 @app.on_event("shutdown")

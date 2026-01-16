@@ -1,4 +1,5 @@
 """Webhook routes for Microsoft Graph notifications."""
+import asyncio
 import logging
 import time
 from typing import Dict, Any, Optional, Tuple
@@ -26,8 +27,18 @@ notion_service = NotionService()
 # Key: request_id from validation token, Value: (subscription_creation_time, resource)
 _subscription_creation_times: Dict[str, Tuple[float, str]] = {}
 
+# Track recent messages for reaction polling (since Graph doesn't send "updated" for reactions)
+# Key: (team_id, channel_id, message_id), Value: timestamp when message was created
+_recent_messages: Dict[Tuple[str, str, str], float] = {}
+
 # Ticket emoji to look for
 TICKET_EMOJI = "🎫"
+
+# Polling interval in seconds (check for reactions every 30 seconds)
+REACTION_POLL_INTERVAL = 30
+
+# How long to keep messages in the polling queue (5 minutes)
+MESSAGE_POLL_RETENTION = 300
 
 
 def extract_team_channel_from_resource(resource: str) -> Optional[Tuple[str, str, str]]:
@@ -162,6 +173,158 @@ async def webhook_root(request: Request):
     raise HTTPException(status_code=404, detail="Use /webhook/notification or /webhook/lifecycle for notifications")
 
 
+async def poll_messages_for_reactions():
+    """
+    Background task that periodically checks recent messages for ticket emoji reactions.
+    
+    Since Microsoft Graph doesn't send "updated" notifications when reactions are added,
+    we poll messages that were created recently to detect new reactions.
+    """
+    while True:
+        try:
+            await asyncio.sleep(REACTION_POLL_INTERVAL)
+            
+            current_time = time.time()
+            messages_to_check = list(_recent_messages.items())
+            
+            if not messages_to_check:
+                continue
+            
+            logger.debug(f"Polling {len(messages_to_check)} message(s) for reactions...")
+            
+            # Check each message
+            for (team_id, channel_id, message_id), created_time in messages_to_check:
+                # Remove old messages (older than retention period)
+                if current_time - created_time > MESSAGE_POLL_RETENTION:
+                    logger.debug(f"Removing old message {message_id} from polling queue (age: {current_time - created_time:.0f}s)")
+                    _recent_messages.pop((team_id, channel_id, message_id), None)
+                    continue
+                
+                try:
+                    # Fetch message to check for reactions
+                    message = graph_service.get_message(team_id, channel_id, message_id)
+                    
+                    # Check for ticket emoji reaction
+                    ticket_reaction = None
+                    if message.reactions:
+                        for reaction in message.reactions:
+                            if reaction.reactionType == TICKET_EMOJI:
+                                ticket_reaction = reaction
+                                break
+                    
+                    if ticket_reaction:
+                        logger.info(f"Polling detected ticket emoji (🎫) reaction on message {message_id}")
+                        # Remove from polling queue immediately
+                        _recent_messages.pop((team_id, channel_id, message_id), None)
+                        
+                        # Process the reaction directly (we already have the message and reaction)
+                        # This avoids re-fetching and potential race conditions
+                        try:
+                            # Get user who added the reaction
+                            reacting_user = ticket_reaction.user
+                            reacting_user_email = reacting_user.get("userIdentity", {}).get("id") or \
+                                                 reacting_user.get("id")
+                            
+                            # Check if user is allowed
+                            if not is_user_allowed(reacting_user_email):
+                                logger.info(f"User {reacting_user_email} is not allowed to create tickets")
+                                continue
+                            
+                            # Get user details for approved_by
+                            try:
+                                user_info = graph_service.get_user_info(reacting_user_email)
+                                approved_by_name = user_info.get("displayName")
+                                approved_by_email = user_info.get("mail") or user_info.get("userPrincipalName") or reacting_user_email
+                            except Exception as e:
+                                logger.warning(f"Could not fetch user info for {reacting_user_email}: {str(e)}")
+                                approved_by_name = None
+                                approved_by_email = reacting_user_email
+                            
+                            # Get message author details
+                            requester_email = None
+                            requester_name = None
+                            if message.from_ and message.from_.user:
+                                requester_id = message.from_.user.get("id")
+                                if requester_id:
+                                    try:
+                                        requester_info = graph_service.get_user_info(requester_id)
+                                        requester_name = requester_info.get("displayName")
+                                        requester_email = requester_info.get("mail") or requester_info.get("userPrincipalName") or requester_id
+                                    except Exception as e:
+                                        logger.warning(f"Could not fetch requester info: {str(e)}")
+                                        requester_email = requester_id
+                            
+                            if not requester_email:
+                                logger.warning(f"Could not determine requester for message {message_id}")
+                                requester_email = "Unknown"
+                            
+                            # Get channel info
+                            try:
+                                channel_info = graph_service.get_channel_info(team_id, channel_id)
+                                channel_name = channel_info.get("displayName", channel_id)
+                            except Exception as e:
+                                logger.warning(f"Could not fetch channel info: {str(e)}")
+                                channel_name = channel_id
+                            
+                            # Extract message content
+                            message_body = ""
+                            if message.body:
+                                message_body = message.body.content or ""
+                                message_body = re.sub(r'<[^>]+>', '', message_body)
+                            
+                            # Extract task title
+                            task_title = message.subject or "Teams Ticket"
+                            if not message.subject and message_body:
+                                first_line = message_body.split('\n')[0].strip()
+                                task_title = first_line[:100] if first_line else "Teams Ticket"
+                            
+                            # Get attachments
+                            attachments = []
+                            if message.attachments:
+                                for attachment in message.attachments:
+                                    if attachment.contentUrl:
+                                        attachments.append(attachment.contentUrl)
+                            
+                            # Get reaction timestamp
+                            approved_at = message.lastModifiedDateTime or datetime.now(timezone.utc)
+                            if isinstance(approved_at, str):
+                                try:
+                                    approved_at = datetime.fromisoformat(approved_at.replace('Z', '+00:00'))
+                                except:
+                                    approved_at = datetime.now(timezone.utc)
+                            
+                            # Create ticket in Notion
+                            logger.info(f"Creating Notion ticket for message {message_id} (from polling)")
+                            notion_service.create_ticket(
+                                task_title=task_title,
+                                description=message_body,
+                                requester_email=requester_email,
+                                requester_name=requester_name,
+                                teams_message_id=message_id,
+                                teams_channel=channel_name,
+                                attachments=attachments,
+                                approved_by_email=approved_by_email,
+                                approved_by_name=approved_by_name,
+                                approved_at=approved_at,
+                            )
+                            
+                            logger.info(f"Successfully created Notion ticket for message {message_id} (from polling)")
+                            
+                        except ValueError as e:
+                            # Duplicate ticket - this is expected
+                            logger.info(f"Ticket already exists: {str(e)}")
+                        except Exception as e:
+                            logger.error(f"Error processing reaction from polling: {str(e)}", exc_info=True)
+                        
+                except Exception as e:
+                    logger.error(f"Error polling message {message_id} for reactions: {str(e)}", exc_info=True)
+                    # Continue with other messages even if one fails
+                    
+        except Exception as e:
+            logger.error(f"Error in reaction polling task: {str(e)}", exc_info=True)
+            await asyncio.sleep(REACTION_POLL_INTERVAL)
+
+
 async def process_message_reaction(notification: ChangeNotification) -> None:
     """
     Process a message reaction notification.
@@ -196,7 +359,9 @@ async def process_message_reaction(notification: ChangeNotification) -> None:
             logger.info(f"Message {message_id} has no reactions")
         
         if not ticket_reaction:
-            logger.info(f"No ticket emoji (🎫) reaction found on message {message_id}. Waiting for emoji to be added...")
+            logger.info(f"No ticket emoji (🎫) reaction found on message {message_id}. Adding to polling queue...")
+            # Store message for polling (since Graph doesn't send "updated" notifications for reactions)
+            _recent_messages[(team_id, channel_id, message_id)] = time.time()
             return
         
         # Get user who added the reaction
@@ -291,6 +456,9 @@ async def process_message_reaction(notification: ChangeNotification) -> None:
         )
         
         logger.info(f"Successfully created Notion ticket for message {message_id}")
+        
+        # Remove from polling queue since ticket was created
+        _recent_messages.pop((team_id, channel_id, message_id), None)
         
     except ValueError as e:
         # Duplicate ticket - this is expected, just log
