@@ -231,12 +231,20 @@ async def poll_messages_for_reactions():
                                 logger.warning(f"Reaction user object is None for message {message_id}")
                                 continue
                             
-                            # The user object structure: {'id': '...', 'displayName': None, 'userIdentityType': 'aadUser', ...}
+                            # The reaction.user structure can be:
+                            # Option 1: Direct user dict: {'id': '...', 'displayName': None, ...}
+                            # Option 2: Nested structure: {'application': None, 'device': None, 'user': {'id': '...', ...}}
                             # Extract user ID (Azure AD object ID)
                             reacting_user_id = None
                             if isinstance(reacting_user, dict):
-                                # The user ID is directly in the user dict
-                                reacting_user_id = reacting_user.get("id")
+                                # Try nested structure first (user.user.id)
+                                nested_user = reacting_user.get("user")
+                                if isinstance(nested_user, dict):
+                                    reacting_user_id = nested_user.get("id")
+                                
+                                # Fallback to direct id
+                                if not reacting_user_id:
+                                    reacting_user_id = reacting_user.get("id")
                             
                             if not reacting_user_id:
                                 logger.warning(f"Could not extract user ID from reaction: {reacting_user}")
@@ -393,12 +401,20 @@ async def process_message_reaction(notification: ChangeNotification) -> None:
             logger.warning(f"Reaction user object is None for message {message_id}")
             return
         
-        # The user object structure: {'id': '...', 'displayName': None, 'userIdentityType': 'aadUser', ...}
+        # The reaction.user structure can be:
+        # Option 1: Direct user dict: {'id': '...', 'displayName': None, ...}
+        # Option 2: Nested structure: {'application': None, 'device': None, 'user': {'id': '...', ...}}
         # Extract user ID (Azure AD object ID)
         reacting_user_id = None
         if isinstance(reacting_user, dict):
-            # The user ID is directly in the user dict
-            reacting_user_id = reacting_user.get("id")
+            # Try nested structure first (user.user.id)
+            nested_user = reacting_user.get("user")
+            if isinstance(nested_user, dict):
+                reacting_user_id = nested_user.get("id")
+            
+            # Fallback to direct id
+            if not reacting_user_id:
+                reacting_user_id = reacting_user.get("id")
         
         if not reacting_user_id:
             logger.warning(f"Could not extract user ID from reaction: {reacting_user}")
