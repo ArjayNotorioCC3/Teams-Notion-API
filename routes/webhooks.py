@@ -185,13 +185,18 @@ async def process_message_reaction(notification: ChangeNotification) -> None:
         # Check if ticket emoji reaction exists
         ticket_reaction = None
         if message.reactions:
+            logger.info(f"Message {message_id} has {len(message.reactions)} reaction(s)")
             for reaction in message.reactions:
+                logger.debug(f"Found reaction: {reaction.reactionType}")
                 if reaction.reactionType == TICKET_EMOJI:
                     ticket_reaction = reaction
+                    logger.info(f"Found ticket emoji (🎫) reaction on message {message_id}")
                     break
+        else:
+            logger.info(f"Message {message_id} has no reactions")
         
         if not ticket_reaction:
-            logger.debug(f"No ticket emoji reaction found on message {message_id}")
+            logger.info(f"No ticket emoji (🎫) reaction found on message {message_id}. Waiting for emoji to be added...")
             return
         
         # Get user who added the reaction
