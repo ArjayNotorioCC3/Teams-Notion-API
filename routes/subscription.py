@@ -155,16 +155,16 @@ async def create_subscription(
         # Create subscription
         subscription_start = time.time()
         try:
-        subscription = graph_service.create_subscription(
-            resource=request.resource,
-            change_types=request.change_types,  # Guard function will filter if needed
+            subscription = graph_service.create_subscription(
+                resource=request.resource,
+                change_types=request.change_types,  # Guard function will filter if needed
                 notification_url=validation_url,  # Use dedicated validation endpoint
-            expiration_datetime=expiration_datetime,
-            lifecycle_notification_url=lifecycle_notification_url
-        )
+                expiration_datetime=expiration_datetime,
+                lifecycle_notification_url=lifecycle_notification_url
+            )
             subscription_time = (time.time() - subscription_start) * 1000
             logger.info(f"Successfully created subscription {subscription.get('id')} for resource {request.resource} in {subscription_time:.2f}ms")
-        return subscription
+            return subscription
         except Exception as e:
             subscription_time = (time.time() - subscription_start) * 1000
             error_message = str(e)
