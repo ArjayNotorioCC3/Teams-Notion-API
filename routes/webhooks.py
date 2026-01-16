@@ -231,42 +231,37 @@ async def poll_messages_for_reactions():
                                 logger.warning(f"Reaction user object is None for message {message_id}")
                                 continue
                             
-                            # Try different ways to extract user email/ID
-                            reacting_user_email = None
+                            # The user object structure: {'id': '...', 'displayName': None, 'userIdentityType': 'aadUser', ...}
+                            # Extract user ID (Azure AD object ID)
+                            reacting_user_id = None
                             if isinstance(reacting_user, dict):
-                                # Try userIdentity.id first
-                                user_identity = reacting_user.get("userIdentity", {})
-                                if isinstance(user_identity, dict):
-                                    reacting_user_email = user_identity.get("id") or user_identity.get("displayName")
-                                
-                                # Fallback to direct id
-                                if not reacting_user_email:
-                                    reacting_user_email = reacting_user.get("id")
-                                
-                                # Try other possible fields
-                                if not reacting_user_email:
-                                    reacting_user_email = reacting_user.get("mail") or reacting_user.get("userPrincipalName")
+                                # The user ID is directly in the user dict
+                                reacting_user_id = reacting_user.get("id")
                             
-                            if not reacting_user_email:
-                                logger.warning(f"Could not extract user email from reaction: {reacting_user}")
+                            if not reacting_user_id:
+                                logger.warning(f"Could not extract user ID from reaction: {reacting_user}")
                                 continue
                             
-                            logger.info(f"Extracted reacting user: {reacting_user_email}")
+                            logger.info(f"Extracted reacting user ID: {reacting_user_id}")
+                            
+                            # Use the user ID to fetch user info (which will give us the email)
+                            try:
+                                user_info = graph_service.get_user_info(reacting_user_id)
+                                reacting_user_email = user_info.get("mail") or user_info.get("userPrincipalName") or reacting_user_id
+                                approved_by_name = user_info.get("displayName")
+                                approved_by_email = reacting_user_email
+                                logger.info(f"Fetched user email: {reacting_user_email}")
+                            except Exception as e:
+                                logger.warning(f"Could not fetch user info for ID {reacting_user_id}: {str(e)}")
+                                # Fallback to using the ID directly
+                                reacting_user_email = reacting_user_id
+                                approved_by_name = None
+                                approved_by_email = reacting_user_email
                             
                             # Check if user is allowed
                             if not is_user_allowed(reacting_user_email):
                                 logger.info(f"User {reacting_user_email} is not allowed to create tickets")
                                 continue
-                            
-                            # Get user details for approved_by
-                            try:
-                                user_info = graph_service.get_user_info(reacting_user_email)
-                                approved_by_name = user_info.get("displayName")
-                                approved_by_email = user_info.get("mail") or user_info.get("userPrincipalName") or reacting_user_email
-                            except Exception as e:
-                                logger.warning(f"Could not fetch user info for {reacting_user_email}: {str(e)}")
-                                approved_by_name = None
-                                approved_by_email = reacting_user_email
                             
                             # Get message author details
                             requester_email = None
@@ -398,42 +393,37 @@ async def process_message_reaction(notification: ChangeNotification) -> None:
             logger.warning(f"Reaction user object is None for message {message_id}")
             return
         
-        # Try different ways to extract user email/ID
-        reacting_user_email = None
+        # The user object structure: {'id': '...', 'displayName': None, 'userIdentityType': 'aadUser', ...}
+        # Extract user ID (Azure AD object ID)
+        reacting_user_id = None
         if isinstance(reacting_user, dict):
-            # Try userIdentity.id first
-            user_identity = reacting_user.get("userIdentity", {})
-            if isinstance(user_identity, dict):
-                reacting_user_email = user_identity.get("id") or user_identity.get("displayName")
-            
-            # Fallback to direct id
-            if not reacting_user_email:
-                reacting_user_email = reacting_user.get("id")
-            
-            # Try other possible fields
-            if not reacting_user_email:
-                reacting_user_email = reacting_user.get("mail") or reacting_user.get("userPrincipalName")
+            # The user ID is directly in the user dict
+            reacting_user_id = reacting_user.get("id")
         
-        if not reacting_user_email:
-            logger.warning(f"Could not extract user email from reaction: {reacting_user}")
+        if not reacting_user_id:
+            logger.warning(f"Could not extract user ID from reaction: {reacting_user}")
             return
         
-        logger.info(f"Extracted reacting user: {reacting_user_email}")
+        logger.info(f"Extracted reacting user ID: {reacting_user_id}")
+        
+        # Use the user ID to fetch user info (which will give us the email)
+        try:
+            user_info = graph_service.get_user_info(reacting_user_id)
+            reacting_user_email = user_info.get("mail") or user_info.get("userPrincipalName") or reacting_user_id
+            approved_by_name = user_info.get("displayName")
+            approved_by_email = reacting_user_email
+            logger.info(f"Fetched user email: {reacting_user_email}")
+        except Exception as e:
+            logger.warning(f"Could not fetch user info for ID {reacting_user_id}: {str(e)}")
+            # Fallback to using the ID directly
+            reacting_user_email = reacting_user_id
+            approved_by_name = None
+            approved_by_email = reacting_user_email
         
         # Check if user is allowed
         if not is_user_allowed(reacting_user_email):
             logger.info(f"User {reacting_user_email} is not allowed to create tickets")
             return
-        
-        # Get user details for approved_by
-        try:
-            user_info = graph_service.get_user_info(reacting_user_email)
-            approved_by_name = user_info.get("displayName")
-            approved_by_email = user_info.get("mail") or user_info.get("userPrincipalName") or reacting_user_email
-        except Exception as e:
-            logger.warning(f"Could not fetch user info for {reacting_user_email}: {str(e)}")
-            approved_by_name = None
-            approved_by_email = reacting_user_email
         
         # Get message author details
         requester_email = None
