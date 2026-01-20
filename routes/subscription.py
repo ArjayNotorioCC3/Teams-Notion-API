@@ -1,6 +1,8 @@
 """Subscription management routes for Microsoft Graph webhooks."""
+import asyncio
 import logging
 import os
+import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query
@@ -13,6 +15,12 @@ router = APIRouter(prefix="/subscription", tags=["subscriptions"])
 
 # Initialize service
 graph_service = GraphService()
+
+# Subscription renewal monitor state
+_renewal_task: Optional[asyncio.Task] = None
+_renewal_running: bool = False
+_renewal_check_interval: int = 300  # Default: 5 minutes (300 seconds)
+_last_check_time: Optional[datetime] = None
 
 
 class CreateSubscriptionRequest(BaseModel):
@@ -284,3 +292,251 @@ async def renew_all_subscriptions(request: RenewSubscriptionRequest) -> Dict[str
     except Exception as e:
         logger.error(f"Error renewing all subscriptions: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to renew subscriptions: {str(e)}")
+
+
+def _parse_expiration_datetime(expiration_str: str) -> Optional[datetime]:
+    """Parse expiration datetime string from Graph API response."""
+    try:
+        # Graph API returns ISO 8601 format with Z or +00:00
+        if expiration_str.endswith("Z"):
+            return datetime.fromisoformat(expiration_str.replace("Z", "+00:00"))
+        return datetime.fromisoformat(expiration_str)
+    except Exception as e:
+        logger.warning(f"Failed to parse expiration datetime: {expiration_str} - {str(e)}")
+        return None
+
+
+def check_and_renew_subscriptions() -> Dict[str, Any]:
+    """
+    Check all subscriptions and renew those expiring soon.
+    
+    Returns:
+        Summary of renewal operations
+    """
+    global _last_check_time
+    _last_check_time = datetime.now(timezone.utc)
+    
+    now = datetime.now(timezone.utc)
+    renewal_threshold = timedelta(minutes=10)  # Renew subscriptions expiring within 10 minutes
+    teams_max_expiration = timedelta(hours=1)  # Teams subscriptions max expiration
+    other_max_expiration = timedelta(days=3)  # Other subscriptions max expiration
+    
+    try:
+        subscriptions = graph_service.list_subscriptions()
+    except Exception as e:
+        logger.error(f"Failed to list subscriptions for renewal check: {str(e)}")
+        return {
+            "total": 0,
+            "renewed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "renewed_ids": [],
+            "failed_ids": [{"error": f"Failed to list subscriptions: {str(e)}"}]
+        }
+    
+    renewed = []
+    failed = []
+    skipped = []
+    
+    for sub in subscriptions:
+        sub_id = sub.get("id")
+        expiration_str = sub.get("expirationDateTime")
+        resource = sub.get("resource", "")
+        
+        if not sub_id:
+            logger.warning("Subscription missing ID, skipping")
+            skipped.append("unknown")
+            continue
+        
+        if not expiration_str:
+            logger.warning(f"Subscription {sub_id} has no expirationDateTime, skipping")
+            skipped.append(sub_id)
+            continue
+        
+        expiration = _parse_expiration_datetime(expiration_str)
+        if not expiration:
+            skipped.append(sub_id)
+            continue
+        
+        time_until_expiry = expiration - now
+        
+        # Check if subscription needs renewal (expiring within threshold)
+        if time_until_expiry <= renewal_threshold:
+            logger.info(f"Subscription {sub_id} expires in {time_until_expiry}, renewing...")
+            
+            # Determine expiration based on subscription type
+            is_teams_message = resource.startswith("/teams/") and "/messages" in resource
+            if is_teams_message:
+                # Teams message subscriptions: 1 hour max
+                new_expiration = now + teams_max_expiration
+            else:
+                # Other subscriptions: 3 days max
+                new_expiration = now + other_max_expiration
+            
+            try:
+                graph_service.renew_subscription(sub_id, new_expiration)
+                renewed.append(sub_id)
+                logger.info(f"Successfully renewed subscription {sub_id} until {new_expiration.isoformat()}")
+            except Exception as e:
+                logger.error(f"Failed to renew subscription {sub_id}: {str(e)}")
+                failed.append({"id": sub_id, "error": str(e)})
+        else:
+            logger.debug(f"Subscription {sub_id} expires in {time_until_expiry}, no renewal needed")
+            skipped.append(sub_id)
+    
+    return {
+        "total": len(subscriptions),
+        "renewed": len(renewed),
+        "failed": len(failed),
+        "skipped": len(skipped),
+        "renewed_ids": renewed,
+        "failed_ids": failed
+    }
+
+
+async def monitor_subscriptions():
+    """
+    Background task that periodically checks and renews expiring subscriptions.
+    
+    Runs in an infinite loop, checking subscriptions every _renewal_check_interval seconds.
+    """
+    global _renewal_running
+    
+    _renewal_running = True
+    logger.info(f"Subscription renewal monitor started (checking every {_renewal_check_interval} seconds)")
+    
+    while _renewal_running:
+        try:
+            await asyncio.sleep(_renewal_check_interval)
+            
+            if not _renewal_running:
+                break
+            
+            logger.info("Checking subscriptions for renewal...")
+            result = check_and_renew_subscriptions()
+            
+            logger.info(
+                f"Renewal check complete: {result['renewed']} renewed, "
+                f"{result['failed']} failed, {result['skipped']} skipped out of {result['total']} total"
+            )
+            
+        except asyncio.CancelledError:
+            logger.info("Subscription renewal monitor cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in subscription renewal monitor: {str(e)}", exc_info=True)
+            # Continue running even if there's an error
+            await asyncio.sleep(_renewal_check_interval)
+    
+    _renewal_running = False
+    logger.info("Subscription renewal monitor stopped")
+
+
+class StartMonitorRequest(BaseModel):
+    """Request model for starting the renewal monitor."""
+    check_interval: Optional[int] = 300  # Default: 5 minutes
+
+
+@router.post("/monitor/start")
+async def start_renewal_monitor(request: StartMonitorRequest = StartMonitorRequest()) -> Dict[str, Any]:
+    """
+    Start the subscription auto-renewal monitor.
+    
+    Args:
+        request: Request with optional check_interval (default: 300 seconds)
+        
+    Returns:
+        Status and monitor information
+    """
+    global _renewal_task, _renewal_running, _renewal_check_interval
+    
+    if _renewal_running and _renewal_task and not _renewal_task.done():
+        return {
+            "status": "already_running",
+            "message": "Renewal monitor is already running",
+            "check_interval": _renewal_check_interval,
+            "last_check": _last_check_time.isoformat() if _last_check_time else None
+        }
+    
+    # Set check interval
+    if request.check_interval and request.check_interval > 0:
+        _renewal_check_interval = request.check_interval
+    else:
+        _renewal_check_interval = 300  # Default to 5 minutes
+    
+    # Cancel existing task if it exists
+    if _renewal_task and not _renewal_task.done():
+        _renewal_task.cancel()
+        try:
+            await _renewal_task
+        except asyncio.CancelledError:
+            pass
+    
+    # Start new monitor task
+    _renewal_task = asyncio.create_task(monitor_subscriptions())
+    
+    logger.info(f"Renewal monitor started with check interval: {_renewal_check_interval} seconds")
+    
+    return {
+        "status": "started",
+        "message": "Renewal monitor started successfully",
+        "check_interval": _renewal_check_interval,
+        "task_id": id(_renewal_task)
+    }
+
+
+@router.post("/monitor/stop")
+async def stop_renewal_monitor() -> Dict[str, Any]:
+    """
+    Stop the subscription auto-renewal monitor.
+    
+    Returns:
+        Confirmation message
+    """
+    global _renewal_task, _renewal_running
+    
+    if not _renewal_running or not _renewal_task:
+        return {
+            "status": "not_running",
+            "message": "Renewal monitor is not running"
+        }
+    
+    # Set flag to stop the loop
+    _renewal_running = False
+    
+    # Cancel the task
+    if not _renewal_task.done():
+        _renewal_task.cancel()
+        try:
+            await _renewal_task
+        except asyncio.CancelledError:
+            pass
+    
+    _renewal_task = None
+    
+    logger.info("Renewal monitor stopped")
+    
+    return {
+        "status": "stopped",
+        "message": "Renewal monitor stopped successfully"
+    }
+
+
+@router.get("/monitor/status")
+async def get_renewal_monitor_status() -> Dict[str, Any]:
+    """
+    Get the status of the subscription auto-renewal monitor.
+    
+    Returns:
+        Monitor status information
+    """
+    global _renewal_task, _renewal_running, _renewal_check_interval, _last_check_time
+    
+    is_running = _renewal_running and _renewal_task and not _renewal_task.done()
+    
+    return {
+        "running": is_running,
+        "check_interval": _renewal_check_interval,
+        "last_check": _last_check_time.isoformat() if _last_check_time else None,
+        "task_id": id(_renewal_task) if _renewal_task else None
+    }

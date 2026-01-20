@@ -120,6 +120,12 @@ async def startup_event():
     import asyncio
     asyncio.create_task(poll_messages_for_reactions())
     logger.info("Reaction polling task started (checking every 30 seconds)")
+    
+    # Start subscription auto-renewal monitor
+    logger.info("Starting subscription auto-renewal monitor...")
+    from routes.subscription import monitor_subscriptions
+    asyncio.create_task(monitor_subscriptions())
+    logger.info("Subscription renewal monitor started (checking every 5 minutes)")
 
 
 @app.on_event("shutdown")
