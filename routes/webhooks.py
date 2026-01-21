@@ -600,10 +600,35 @@ async def webhook_lifecycle(request: Request):
         try:
             logger.info(f"Lifecycle event: {change.changeType} for subscription {change.subscriptionId}")
             
-            # Handle subscription expiration warnings
-            if change.changeType == "subscriptionRemoved" or "expired" in change.changeType.lower():
+            # AUTO-RENEWAL: Handle reauthorizationRequired
+            if change.changeType == "reauthorizationRequired":
+                logger.info(f"Subscription {change.subscriptionId} requires reauthorization - attempting renewal")
+                try:
+                    from services.graph_service import GraphService
+                    from datetime import datetime, timedelta, timezone
+                    from config import settings
+                    
+                    # Check if auto-renewal is enabled
+                    auto_renew_enabled = getattr(settings, 'auto_renew_subscriptions', True)
+                    if auto_renew_enabled:
+                        graph_service = GraphService()
+                        # Renew for ~57 minutes (Teams max is 60 min)
+                        renewal_minutes = getattr(settings, 'subscription_renewal_minutes', 57)
+                        new_expiration = datetime.now(timezone.utc) + timedelta(minutes=renewal_minutes)
+                        graph_service.renew_subscription(change.subscriptionId, new_expiration)
+                        logger.info(f"Successfully renewed subscription {change.subscriptionId} for {renewal_minutes} minutes")
+                    else:
+                        logger.info(f"Auto-renewal disabled - skipping renewal for subscription {change.subscriptionId}")
+                except Exception as renew_error:
+                    logger.error(f"Failed to renew subscription {change.subscriptionId}: {renew_error}")
+            
+            # Handle subscription expiration/removal
+            elif change.changeType == "subscriptionRemoved" or "expired" in change.changeType.lower():
                 logger.warning(f"Subscription {change.subscriptionId} has expired or been removed")
-                # You could implement auto-renewal here if needed
+            
+            # Handle missed notifications
+            elif change.changeType == "missed":
+                logger.warning(f"Missed notifications for subscription {change.subscriptionId}")
                 
         except Exception as e:
             logger.error(f"Error processing lifecycle notification: {str(e)}", exc_info=True)

@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     default_subscription_resource: Optional[str] = None
     default_subscription_expiration_days: float = 0.04  # Default: ~1 hour for Teams
     
+    # Auto-renewal configuration
+    auto_renew_subscriptions: bool = True  # Enable/disable auto-renewal of subscriptions
+    subscription_renewal_minutes: int = 57  # Teams max is 60 minutes
+    
     @validator("allowed_users")
     def parse_allowed_users(cls, v):
         """Parse comma-separated email list."""
