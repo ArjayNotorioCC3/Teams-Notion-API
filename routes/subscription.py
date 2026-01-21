@@ -196,6 +196,51 @@ async def create_subscription(
         raise HTTPException(status_code=500, detail=f"Failed to create subscription: {str(e)}")
 
 
+@router.post("/create-default")
+async def create_default_subscription() -> Dict[str, Any]:
+    """
+    Create a subscription using default values from environment variables.
+    
+    This endpoint uses hardcoded values from DEFAULT_SUBSCRIPTION_RESOURCE
+    and DEFAULT_SUBSCRIPTION_EXPIRATION_DAYS, so no payload is needed.
+    
+    Returns:
+        Created subscription data
+        
+    Raises:
+        HTTPException: If default subscription resource is not configured
+    """
+    try:
+        from config import settings
+        
+        # Validate that default resource is configured
+        if not settings.default_subscription_resource:
+            raise HTTPException(
+                status_code=400,
+                detail="DEFAULT_SUBSCRIPTION_RESOURCE is not configured in .env file. "
+                       "Please set DEFAULT_SUBSCRIPTION_RESOURCE environment variable."
+            )
+        
+        # Create a request object with default values
+        request = CreateSubscriptionRequest(
+            resource=settings.default_subscription_resource,
+            change_types=["created"],  # Teams messages only support "created"
+            expiration_days=settings.default_subscription_expiration_days
+        )
+        
+        logger.info(f"Creating default subscription for resource: {settings.default_subscription_resource}")
+        
+        # Reuse the existing create_subscription logic
+        return await create_subscription(request, pre_warmup=False)
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (like the one we just raised)
+        raise
+    except Exception as e:
+        logger.error(f"Error creating default subscription: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create default subscription: {str(e)}")
+
+
 @router.post("/renew/{subscription_id}")
 async def renew_subscription(
     subscription_id: str,

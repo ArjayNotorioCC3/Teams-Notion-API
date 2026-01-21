@@ -1,5 +1,5 @@
 """Configuration management for the Teams-Notion middleware."""
-from typing import List
+from typing import List, Optional
 from pydantic import BaseSettings, validator
 
 
@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     
     # Optional: Source identifier
     ticket_source: str = "Teams"
+    
+    # Optional: Default subscription configuration
+    default_subscription_resource: Optional[str] = None
+    default_subscription_expiration_days: float = 0.04  # Default: ~1 hour for Teams
     
     @validator("allowed_users")
     def parse_allowed_users(cls, v):
