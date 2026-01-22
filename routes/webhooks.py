@@ -8,7 +8,7 @@ from fastapi.responses import PlainTextResponse
 from models.webhook_models import Notification, ChangeNotification
 from services.graph_service import GraphService
 from services.notion_service import NotionService
-from utils.validation import is_user_allowed
+from utils.validation import is_user_allowed, normalize_email
 from utils.auth import verify_webhook_client_state
 from datetime import datetime, timezone
 from urllib.parse import unquote, unquote_plus
@@ -256,13 +256,14 @@ async def poll_messages_for_reactions():
                             try:
                                 user_info = graph_service.get_user_info(reacting_user_id)
                                 reacting_user_email = user_info.get("mail") or user_info.get("userPrincipalName") or reacting_user_id
+                                reacting_user_email = normalize_email(reacting_user_email)
                                 approved_by_name = user_info.get("displayName")
                                 approved_by_email = reacting_user_email
                                 logger.info(f"Fetched user email: {reacting_user_email}")
                             except Exception as e:
                                 logger.warning(f"Could not fetch user info for ID {reacting_user_id}: {str(e)}")
                                 # Fallback to using the ID directly
-                                reacting_user_email = reacting_user_id
+                                reacting_user_email = normalize_email(reacting_user_id)
                                 approved_by_name = None
                                 approved_by_email = reacting_user_email
                             
@@ -281,6 +282,7 @@ async def poll_messages_for_reactions():
                                         requester_info = graph_service.get_user_info(requester_id)
                                         requester_name = requester_info.get("displayName")
                                         requester_email = requester_info.get("mail") or requester_info.get("userPrincipalName") or requester_id
+                                        requester_email = normalize_email(requester_email)
                                     except Exception as e:
                                         logger.warning(f"Could not fetch requester info: {str(e)}")
                                         requester_email = requester_id
@@ -426,13 +428,14 @@ async def process_message_reaction(notification: ChangeNotification) -> None:
         try:
             user_info = graph_service.get_user_info(reacting_user_id)
             reacting_user_email = user_info.get("mail") or user_info.get("userPrincipalName") or reacting_user_id
+            reacting_user_email = normalize_email(reacting_user_email)
             approved_by_name = user_info.get("displayName")
             approved_by_email = reacting_user_email
             logger.info(f"Fetched user email: {reacting_user_email}")
         except Exception as e:
             logger.warning(f"Could not fetch user info for ID {reacting_user_id}: {str(e)}")
             # Fallback to using the ID directly
-            reacting_user_email = reacting_user_id
+            reacting_user_email = normalize_email(reacting_user_id)
             approved_by_name = None
             approved_by_email = reacting_user_email
         
@@ -451,9 +454,10 @@ async def process_message_reaction(notification: ChangeNotification) -> None:
                     requester_info = graph_service.get_user_info(requester_id)
                     requester_name = requester_info.get("displayName")
                     requester_email = requester_info.get("mail") or requester_info.get("userPrincipalName") or requester_id
+                    requester_email = normalize_email(requester_email)
                 except Exception as e:
                     logger.warning(f"Could not fetch requester info: {str(e)}")
-                    requester_email = requester_id
+                    requester_email = normalize_email(requester_id)
         
         if not requester_email:
             logger.warning(f"Could not determine requester for message {message_id}")
