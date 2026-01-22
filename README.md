@@ -71,6 +71,14 @@ DEFAULT_TICKET_STATUS=New
 
 # Optional: Source identifier
 TICKET_SOURCE=Teams
+
+# Optional: Default subscription configuration (for /subscription/create-default)
+DEFAULT_SUBSCRIPTION_RESOURCE=teams/{teamId}/channels/{channelId}/messages
+DEFAULT_SUBSCRIPTION_EXPIRATION_DAYS=0.04
+
+# Optional: Auto-renewal configuration
+AUTO_RENEW_SUBSCRIPTIONS=true
+SUBSCRIPTION_RENEWAL_MINUTES=57
 ```
 
 ### 3. Run with Docker Compose
@@ -184,6 +192,8 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
     "expiration_days": 3
   }
   ```
+- `POST /subscription/create-default` - Create subscription using environment defaults (no payload required)
+  - Uses `DEFAULT_SUBSCRIPTION_RESOURCE` and `DEFAULT_SUBSCRIPTION_EXPIRATION_DAYS` from `.env`
 - `POST /subscription/renew/{subscription_id}` - Renew a subscription
 - `DELETE /subscription/delete/{subscription_id}` - Delete a subscription
 - `POST /subscription/renew-all` - Renew all active subscriptions
@@ -225,7 +235,9 @@ Replace `{teamId}` and `{channelId}` with your actual Team and Channel IDs.
 
 ### 2. Monitor Subscriptions
 
-Microsoft Graph subscriptions expire after 3 days (maximum). For Teams messages, the maximum is 1 hour. Use the renew endpoints to keep them active:
+Microsoft Graph subscriptions expire after 3 days (maximum). For Teams messages, the maximum is 1 hour. The application includes **automatic renewal** - when Microsoft Graph sends a `reauthorizationRequired` lifecycle notification, the app automatically renews the subscription.
+
+You can also manually renew subscriptions:
 
 ```bash
 # Renew all subscriptions
@@ -234,7 +246,43 @@ curl -X POST "http://localhost:8000/subscription/renew-all" \
   -d '{"expiration_days": 3}'
 ```
 
-### 3. How It Works
+### 3. Creating Subscriptions via Graph Explorer (Recommended)
+
+If you encounter validation timeout errors when creating subscriptions via the API, you can create them manually using [Microsoft Graph Explorer](https://developer.microsoft.com/en-us/graph/graph-explorer). This approach works because the request originates from Microsoft's infrastructure, avoiding network latency issues.
+
+**Why this works:** When your app creates a subscription, the request goes from your server to Microsoft Graph, which then validates your webhook endpoint. Network latency in this round-trip can cause timeouts. Graph Explorer bypasses this by originating from Microsoft's servers.
+
+**Step-by-step guide:**
+
+1. Go to [Graph Explorer](https://developer.microsoft.com/en-us/graph/graph-explorer)
+2. Sign in with your Microsoft 365 account
+3. Select **POST** method
+4. Enter the URL: `https://graph.microsoft.com/v1.0/subscriptions`
+5. Add the request body:
+
+```json
+{
+  "resource": "/teams/{teamId}/channels/{channelId}/messages",
+  "changeType": "created",
+  "notificationUrl": "https://your-domain.com/graph/validate",
+  "lifecycleNotificationUrl": "https://your-domain.com/graph/validate",
+  "expirationDateTime": "2026-01-21T23:00:00Z",
+  "clientState": "your-webhook-client-state"
+}
+```
+
+6. Replace the placeholders:
+   - `{teamId}` - Your Teams team ID
+   - `{channelId}` - Your Teams channel ID
+   - `your-domain.com` - Your webhook domain
+   - `expirationDateTime` - Set to ~1 hour from now (Teams max)
+   - `clientState` - Must match `WEBHOOK_CLIENT_STATE` in your `.env`
+
+7. Click **Run query**
+
+**After creation:** The app's auto-renewal feature will automatically keep the subscription active. When Microsoft sends a `reauthorizationRequired` notification before expiration, the app renews it for another 57 minutes.
+
+### 4. How It Works
 
 1. A user posts a message in a Teams channel
 2. An allowed user reacts to the message with the ticket emoji (🎫)
